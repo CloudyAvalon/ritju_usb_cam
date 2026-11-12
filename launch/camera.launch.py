@@ -40,6 +40,7 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path)
 
 from camera_config import CameraConfig, USB_CAM_DIR  # noqa: E402
+from usb_cam_runtime_config import get_node_parameters  # noqa: E402
 
 from launch import LaunchDescription  # noqa: E402
 from launch.actions import GroupAction  # noqa: E402
@@ -117,7 +118,7 @@ def generate_launch_description():
             package='usb_cam', executable='usb_cam_node_exe', output='screen',
             name=camera.name,
             namespace=camera.namespace,
-            parameters=[camera.param_path],
+            parameters=[camera.param_path, get_node_parameters(camera.name)],
             remappings=camera.remappings,
             respawn=True,
             respawn_delay=10,

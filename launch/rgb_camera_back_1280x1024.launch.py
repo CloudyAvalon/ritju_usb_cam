@@ -30,103 +30,49 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-import argparse
-import os
-from pathlib import Path  # noqa: E402
+import math
+from pathlib import Path
 import sys
 
-# Hack to get relative import of .camera_config file working
-dir_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(dir_path)
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
-from camera_config import CameraConfig, USB_CAM_DIR  # noqa: E402
+_LAUNCH_DIR = str(Path(__file__).resolve().parent)
+if _LAUNCH_DIR not in sys.path:
+    sys.path.insert(0, _LAUNCH_DIR)
+from usb_cam_runtime_config import get_node_parameters
 
-from launch import LaunchDescription  # noqa: E402
-from launch.actions import GroupAction  # noqa: E402
-from launch_ros.actions import Node  # noqa: E402
 
-import json
-def parse_cameras():
-    # 从环境变量获取CAMERAS值
-    cameras_str = os.getenv('CAMERAS')
-    cameras_str = '[{"name":"rgb_camera_back", "config_file":"back_1280x1024.yaml"}]'
+def _camera_node(context):
+    dynamic = get_node_parameters('rgb_camera_back')
+    explicit_rate = LaunchConfiguration('framerate').perform(context).strip()
+    rate = float(explicit_rate) if explicit_rate else float(dynamic.get('framerate', 10.0))
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError('framerate must be finite and positive')
+    width = int(LaunchConfiguration('image_width').perform(context))
+    height = int(LaunchConfiguration('image_height').perform(context))
+    if width <= 0 or height <= 0:
+        raise ValueError('image dimensions must be positive')
+    return [Node(
+        package='usb_cam', executable='usb_cam_node_exe', output='screen',
+        name='rgb_camera_back', respawn=True, respawn_delay=10,
+        parameters=[LaunchConfiguration('params_file'), {'pub_compressed': False}, dynamic,
+                    {'image_width': width, 'image_height': height, 'framerate': rate}],
+        remappings=[('image_raw', 'rgb_camera_back/image_raw'),
+                    ('image_raw/compressed', 'rgb_camera_back/compressed'),
+                    ('image_raw/compressedDepth', 'rgb_camera_back/compressedDepth'),
+                    ('image_raw/theora', 'rgb_camera_back/image_raw/theora'),
+                    ('camera_info', 'rgb_camera_back/camera_info')],
+    )]
 
-    if not cameras_str:
-        print("错误：CAMERAS环境变量未设置")
-        return None
-    
-    # 去除可能的单引号包裹
-    if cameras_str and cameras_str.startswith("'") and cameras_str.endswith("'"):
-        cameras_str = cameras_str[1:-1]
-    
-    # 解析JSON字符串
-    try:
-        # 解析JSON
-        cameras_data = json.loads(cameras_str)
-        
-        # 验证数据结构
-        if not isinstance(cameras_data, list):
-            print("错误：CAMERAS不是一个列表")
-            return None
-            
-        for camera in cameras_data:
-            if not all(key in camera for key in ['name', 'config_file']):
-                print(f"错误：相机配置缺少必要字段 - {camera}")
-                return None
-                
-        return cameras_data
-    except json.JSONDecodeError as e:
-        print(f"JSON解析错误: {e}")
-        return None
-
-CAMERAS = []
-# print(f"USB_CAM_DIR: {USB_CAM_DIR}")
-
-camera_infos = parse_cameras()
-
-if camera_infos != None:
-    for i in range(len(camera_infos)):
-        print(f'name: {camera_infos[i]["name"]}')
-        print(f'config_file: {camera_infos[i]["config_file"]}')
-
-    for i in range(len(camera_infos)):
-    # for i in range(0,2):
-        CAMERAS.append( 
-            CameraConfig(
-                name=camera_infos[i]["name"],
-                param_path=Path('/map/config/usb_cam', camera_infos[i]["config_file"])
-            )
-        )
-
-# CAMERAS.append(
-#     CameraConfig(
-#         name='camera1',
-#         param_path=Path(USB_CAM_DIR, 'config', 'params_front.yaml')
-#     )
-#     # Add more Camera's here and they will automatically be launched below
-# )
 
 def generate_launch_description():
-    ld = LaunchDescription()
-
-    parser = argparse.ArgumentParser(description='usb_cam demo')
-    parser.add_argument('-n', '--node-name', dest='node_name', type=str,
-                        help='name for device', default='usb_cam')
-
-    camera_nodes = [
-        Node(
-            package='usb_cam', executable='usb_cam_node_exe', output='screen',
-            name=camera.name,
-            namespace=camera.namespace,
-            parameters=[camera.param_path],
-            remappings=camera.remappings,
-            respawn=True,
-            respawn_delay=10,
-        )
-        for camera in CAMERAS
-    ]
-
-    camera_group = GroupAction(camera_nodes)
-
-    ld.add_action(camera_group)
-    return ld
+    return LaunchDescription([
+        DeclareLaunchArgument('params_file', default_value='/map/config/usb_cam/back_1280x1024.yaml'),
+        DeclareLaunchArgument('image_width', default_value='1280'),
+        DeclareLaunchArgument('image_height', default_value='1024'),
+        DeclareLaunchArgument('framerate', default_value=''),
+        OpaqueFunction(function=_camera_node),
+    ])
