@@ -41,6 +41,9 @@
 
   <!-- Image recorder composable node fused into the back-camera container -->
   <exec_depend>cpp_video_stream</exec_depend>
+  <!-- apriltag_ros is fused into the same container at run time but is a
+       workspace package; declaring it here forces colcon to build
+       apriltag/apriltag_ros before usb_cam, so it stays undeclared. -->
 
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>

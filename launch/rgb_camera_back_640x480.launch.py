@@ -39,6 +39,7 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path)
 
 from camera_config import CameraConfig, USB_CAM_DIR  # noqa: E402
+from apriltag_config import apriltag_component  # noqa: E402
 from video_stream_config import image_stream_component  # noqa: E402
 
 from launch import LaunchDescription  # noqa: E402
@@ -122,6 +123,7 @@ def generate_launch_description():
     # Camera and recorder share one container process: a single launch entry,
     # one process and one respawn policy cover both.
     camera_nodes.append(image_stream_component())
+    camera_nodes.append(apriltag_component())
 
     ld.add_action(ComposableNodeContainer(
         name='usb_cam_with_image_stream_container',

@@ -44,6 +44,7 @@ _LAUNCH_DIR = str(Path(__file__).resolve().parent)
 if _LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _LAUNCH_DIR)
 from usb_cam_runtime_config import get_node_parameters
+from apriltag_config import apriltag_component
 from video_stream_config import image_stream_component
 
 
@@ -77,7 +78,8 @@ def _camera_container(context):
         namespace='',
         package='rclcpp_components',
         executable='component_container_mt',
-        composable_node_descriptions=[camera_node, image_stream_component()],
+        composable_node_descriptions=[
+            camera_node, image_stream_component(), apriltag_component()],
         output='screen',
         # respawn keeps camera and recorder alive across USB dropouts.
         respawn=True, respawn_delay=10,
