@@ -39,6 +39,9 @@
   <exec_depend>python3-pydantic</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
 
+  <!-- Image recorder composable node fused into the back-camera container -->
+  <exec_depend>cpp_video_stream</exec_depend>
+
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

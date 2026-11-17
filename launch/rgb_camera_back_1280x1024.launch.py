@@ -37,15 +37,17 @@ import sys
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer
+from launch_ros.descriptions import ComposableNode
 
 _LAUNCH_DIR = str(Path(__file__).resolve().parent)
 if _LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _LAUNCH_DIR)
 from usb_cam_runtime_config import get_node_parameters
+from video_stream_config import image_stream_component
 
 
-def _camera_node(context):
+def _camera_container(context):
     dynamic = get_node_parameters('rgb_camera_back')
     explicit_rate = LaunchConfiguration('framerate').perform(context).strip()
     rate = float(explicit_rate) if explicit_rate else float(dynamic.get('framerate', 10.0))
@@ -55,24 +57,40 @@ def _camera_node(context):
     height = int(LaunchConfiguration('image_height').perform(context))
     if width <= 0 or height <= 0:
         raise ValueError('image dimensions must be positive')
-    return [Node(
-        package='usb_cam', executable='usb_cam_node_exe', output='screen',
-        name='rgb_camera_back', respawn=True, respawn_delay=10,
-        parameters=[LaunchConfiguration('params_file'), {'pub_compressed': False}, dynamic,
+
+    camera_node = ComposableNode(
+        package='usb_cam', plugin='usb_cam::UsbCamNode',
+        name='rgb_camera_back',
+        parameters=[LaunchConfiguration('params_file').perform(context),
+                    {'pub_compressed': False}, dynamic,
                     {'image_width': width, 'image_height': height, 'framerate': rate}],
         remappings=[('image_raw', 'rgb_camera_back/image_raw'),
                     ('image_raw/compressed', 'rgb_camera_back/compressed'),
                     ('image_raw/compressedDepth', 'rgb_camera_back/compressedDepth'),
                     ('image_raw/theora', 'rgb_camera_back/image_raw/theora'),
                     ('camera_info', 'rgb_camera_back/camera_info')],
+    )
+    # Camera and recorder share one container process: a single launch entry,
+    # one process and one respawn policy cover both.
+    return [ComposableNodeContainer(
+        name='usb_cam_with_image_stream_container',
+        namespace='',
+        package='rclcpp_components',
+        executable='component_container_mt',
+        composable_node_descriptions=[camera_node, image_stream_component()],
+        output='screen',
+        # respawn keeps camera and recorder alive across USB dropouts.
+        respawn=True, respawn_delay=10,
     )]
 
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('params_file', default_value='/map/config/usb_cam/back_1280x1024.yaml'),
+        DeclareLaunchArgument(
+            'params_file',
+            default_value='/map/config/usb_cam/back_1280x1024.yaml'),
         DeclareLaunchArgument('image_width', default_value='1280'),
         DeclareLaunchArgument('image_height', default_value='1024'),
         DeclareLaunchArgument('framerate', default_value=''),
-        OpaqueFunction(function=_camera_node),
+        OpaqueFunction(function=_camera_container),
     ])
