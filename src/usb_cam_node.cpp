@@ -83,6 +83,8 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions& node_options)
   this->declare_parameter("undistort_image_gpu", false);
   this->declare_parameter("pub_raw", true);
   this->declare_parameter("pub_compressed", true);
+  this->declare_parameter("frame_sanity_check", true);
+  this->declare_parameter("frame_sanity_max_consecutive", 10);
 
   get_params();
   init();
@@ -214,6 +216,7 @@ void UsbCamNode::init()
   try
   {
     m_camera->configure(m_parameters, io_method);
+    m_camera->set_frame_sanity_enabled(m_parameters.frame_sanity_check);
   }
   catch (const std::exception& e)
   {
@@ -261,7 +264,8 @@ void UsbCamNode::get_params()
                                                         "auto_white_balance", "white_balance",       "autoexposure",
                                                         "exposure",           "autofocus",           "focus",
                                                         "undistort_image",    "undistort_image_gpu", "pub_raw",
-                                                        "pub_compressed" });
+                                                        "pub_compressed",     "frame_sanity_check",
+                                                        "frame_sanity_max_consecutive" });
 
   assign_params(parameters);
 }
@@ -367,6 +371,14 @@ void UsbCamNode::assign_params(const std::vector<rclcpp::Parameter>& parameters)
     else if (parameter.get_name() == "pub_compressed")
     {
       m_parameters.pub_compressed = parameter.as_bool();
+    }
+    else if (parameter.get_name() == "frame_sanity_check")
+    {
+      m_parameters.frame_sanity_check = parameter.as_bool();
+    }
+    else if (parameter.get_name() == "frame_sanity_max_consecutive")
+    {
+      m_frame_sanity_max_consecutive = parameter.as_int();
     }
     else if (parameter.get_name() == "focus")
     {
@@ -605,8 +617,43 @@ bool UsbCamNode::take_and_send_image()
     m_image_msg->data.resize(m_camera->get_image_size_in_bytes());
   }
 
-  // grab the image, pass image msg buffer to fill
-  m_camera->get_image(reinterpret_cast<char*>(&m_image_msg->data[0]));
+  // grab the image, pass image msg buffer to fill.
+  // A dropped frame (empty/oversized payload, missing MJPEG SOI, decode
+  // failure) must not publish a stale or garbage buffer.
+  if (!m_camera->get_image(reinterpret_cast<char*>(&m_image_msg->data[0])))
+  {
+    const std::string& reason = m_camera->last_frame_error();
+    if (reason.empty())
+    {
+      // No frame completed since the last tick: normal jitter, nothing to log.
+      return false;
+    }
+    ++m_bad_frame_total;
+    ++m_bad_frame_streak;
+    if (m_bad_frame_streak == 1 || (m_bad_frame_streak % 10) == 0)
+    {
+      RCLCPP_ERROR(get_logger(), "dropping frame (%zu total, %d consecutive): %s",
+                   m_bad_frame_total, m_bad_frame_streak, reason.c_str());
+    }
+    else
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "dropping frame: %s", reason.c_str());
+    }
+    if (m_frame_sanity_max_consecutive > 0 &&
+        m_bad_frame_streak >= m_frame_sanity_max_consecutive)
+    {
+      // Escalate instead of dropping forever: the container is launched with
+      // respawn=True, so exiting here restarts the whole camera stack (usb_cam,
+      // recorder and apriltag) and the failure is visible in the logs.
+      RCLCPP_FATAL(get_logger(),
+                   "%d consecutive bad frames (last: %s); shutting the camera stack down so the "
+                   "container respawns", m_bad_frame_streak, reason.c_str());
+      rclcpp::shutdown();
+      return false;
+    }
+    return false;
+  }
+  m_bad_frame_streak = 0;
   *m_camera_info_msg = m_camera_info->getCameraInfo();
   RCLCPP_INFO_ONCE(get_logger(), "undistort_image: %s", m_parameters.undistort_image ? "true" : "false");
   RCLCPP_INFO_ONCE(get_logger(), "undistort_image_gpu: %s", m_parameters.undistort_image_gpu ? "true" : "false");
@@ -679,6 +726,7 @@ UsbCamNode::parameters_callback(const std::vector<rclcpp::Parameter>& parameters
   RCLCPP_DEBUG(this->get_logger(), "Setting parameters for %s", m_parameters.camera_name.c_str());
   m_timer->reset();
   assign_params(parameters);
+  m_camera->set_frame_sanity_enabled(m_parameters.frame_sanity_check);
   set_v4l2_params();
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
@@ -693,10 +741,11 @@ void UsbCamNode::update()
     // If the camera exposure longer higher than the framerate period
     // then that caps the framerate.
     // auto t0 = now();
-    bool isSuccessful = take_and_send_image();
-    if (!isSuccessful)
+    if (!take_and_send_image())
     {
-      RCLCPP_WARN_ONCE(this->get_logger(), "USB camera did not respond in time.");
+      RCLCPP_DEBUG_THROTTLE(
+        this->get_logger(), *this->get_clock(), 5000,
+        "no frame published this tick (no new frame or a dropped frame)");
     }
   }
 }

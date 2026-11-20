@@ -129,6 +129,7 @@ typedef struct parameters_t
   bool undistort_image_gpu;
   bool pub_raw;
   bool pub_compressed;
+  bool frame_sanity_check;
 
   parameters_t()
 // *INDENT-OFF*
@@ -156,7 +157,8 @@ typedef struct parameters_t
     undistort_image(false),
     undistort_image_gpu(false),
     pub_raw(true),
-    pub_compressed(true)
+    pub_compressed(true),
+    frame_sanity_check(true)
   {
   }
 // *INDENT-ON*
@@ -218,11 +220,20 @@ public:
   ///   auto new_image = get_image();
   ///   image_msg.data.resize(step * height);
   ///   memcpy(&image_msg.data[0], new_image->frame.base, image_msg.data.size());
+  /// @return pointer to image data, or nullptr when the frame was dropped
   char * get_image();
 
   /// @brief Overload of get_image to allow users to pass
   /// in an image pointer to fill in
-  void get_image(char * destination);
+  /// @return true when a valid frame was written, false when it was dropped
+  ///         (destination is left untouched for sanity-check drops)
+  bool get_image(char * destination);
+
+  /// @brief Reason of the last dropped frame (empty after a successful grab)
+  const std::string & last_frame_error() const {return m_last_frame_error;}
+
+  /// @brief Enable/disable the driver payload sanity checks (default enabled)
+  void set_frame_sanity_enabled(bool enabled) {m_frame_sanity_enabled = enabled;}
 
   std::vector<capture_format_t> get_supported_formats();
 
@@ -416,8 +427,8 @@ private:
   void init_device();
 
   void open_device();
-  void grab_image();
-  void read_frame();
+  bool grab_image();
+  bool read_frame();
   void process_image(const char * src, char * & dest, const int & bytes_used);
 
   void uninit_device();
@@ -429,6 +440,8 @@ private:
   unsigned int m_number_of_buffers;
   std::shared_ptr<usb_cam::utils::buffer[]> m_buffers;
   image_t m_image;
+  std::string m_last_frame_error;
+  bool m_frame_sanity_enabled{true};
 
   AVFrame * m_avframe;
   AVCodec * m_avcodec;

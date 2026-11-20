@@ -40,6 +40,7 @@ sys.path.append(dir_path)
 
 from camera_config import CameraConfig, USB_CAM_DIR  # noqa: E402
 from apriltag_config import apriltag_component  # noqa: E402
+from container_components import selected_components  # noqa: E402
 from video_stream_config import image_stream_component  # noqa: E402
 
 from launch import LaunchDescription  # noqa: E402
@@ -120,10 +121,16 @@ def generate_launch_description():
         )
         for camera in CAMERAS
     ]
-    # Camera and recorder share one container process: a single launch entry,
-    # one process and one respawn policy cover both.
-    camera_nodes.append(image_stream_component())
-    camera_nodes.append(apriltag_component())
+    # Camera, recorder and charger detector share one container process: a
+    # single launch entry, one process and one respawn policy cover them.  The
+    # optional nodes are selected by USB_CAM_CONTAINER_COMPONENTS (camera,
+    # camera+stream or camera+stream+apriltag).
+    components = selected_components()
+    if 'stream' in components:
+        camera_nodes.append(image_stream_component())
+    if 'apriltag' in components:
+        camera_nodes.append(apriltag_component())
+    print(f'[usb_cam] back-camera container components: {"+".join(components)}')
 
     ld.add_action(ComposableNodeContainer(
         name='usb_cam_with_image_stream_container',

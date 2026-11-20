@@ -45,6 +45,7 @@ if _LAUNCH_DIR not in sys.path:
     sys.path.insert(0, _LAUNCH_DIR)
 from usb_cam_runtime_config import get_node_parameters
 from apriltag_config import apriltag_component
+from container_components import selected_components
 from video_stream_config import image_stream_component
 
 
@@ -71,15 +72,24 @@ def _camera_container(context):
                     ('image_raw/theora', 'rgb_camera_back/image_raw/theora'),
                     ('camera_info', 'rgb_camera_back/camera_info')],
     )
-    # Camera and recorder share one container process: a single launch entry,
-    # one process and one respawn policy cover both.
+    # Camera, recorder and charger detector share one container process: a
+    # single launch entry, one process and one respawn policy cover them.  The
+    # optional nodes are selected by USB_CAM_CONTAINER_COMPONENTS (camera,
+    # camera+stream or camera+stream+apriltag).
+    components = selected_components()
+    nodes = [camera_node]
+    if 'stream' in components:
+        nodes.append(image_stream_component())
+    if 'apriltag' in components:
+        nodes.append(apriltag_component())
+    print(f'[usb_cam] back-camera container components: {"+".join(components)}')
+
     return [ComposableNodeContainer(
         name='usb_cam_with_image_stream_container',
         namespace='',
         package='rclcpp_components',
         executable='component_container_mt',
-        composable_node_descriptions=[
-            camera_node, image_stream_component(), apriltag_component()],
+        composable_node_descriptions=nodes,
         output='screen',
         # respawn keeps camera and recorder alive across USB dropouts.
         respawn=True, respawn_delay=10,
