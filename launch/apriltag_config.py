@@ -20,10 +20,56 @@ usb_cam is built on its own.
 """
 
 import os
+import shutil
 
 # Parameter file seeded by the GPU image under /map/config.
 CONF_DIR = os.environ.get('APRILTAG_DETECTION_CONF_DIR', '/map/config/apriltag_ros')
 PARAMS_FILE = os.path.join(CONF_DIR, 'apriltag_double.yaml')
+
+
+def _default_params_file():
+    """Package default used as the seed source (None if apriltag_ros is absent)."""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        return os.path.join(
+            get_package_share_directory('apriltag_ros'), 'cfg', 'apriltag_double.yaml')
+    except Exception as exc:  # PackageNotFoundError / import error
+        print(f'[apriltag] cannot locate the apriltag_ros package default: {exc}')
+        return None
+
+
+def ensure_params_file():
+    """Return a params file that exists, seeding /map/config on first start.
+
+    ``ComposableNode(parameters=[PARAMS_FILE, ...])`` makes launch read the file
+    while the component is created.  /map is a bind mount, so on a fresh robot
+    the file is absent and the whole camera launch dies with::
+
+        Caught exception in launch: [Errno 2] No such file or directory:
+        '/map/config/apriltag_ros/apriltag_double.yaml'
+
+    Seed it from the package default instead.  If /map is missing or read-only,
+    fall back to the package default so a camera problem cannot take down the
+    camera container.
+    """
+    if os.path.isfile(PARAMS_FILE):
+        return PARAMS_FILE
+
+    default_file = _default_params_file()
+    if default_file is None:
+        return PARAMS_FILE  # nothing to seed from: let launch report the missing file
+
+    try:
+        os.makedirs(CONF_DIR, exist_ok=True)
+        shutil.copy2(default_file, PARAMS_FILE)
+        print(f'[apriltag] seeded {PARAMS_FILE} from {default_file}')
+        return PARAMS_FILE
+    except OSError as exc:
+        print(
+            f'[apriltag] WARNING: cannot seed {PARAMS_FILE} ({exc}); '
+            f'using package default {default_file}')
+        return default_file
 
 
 def _env_str(name, default):
@@ -74,7 +120,7 @@ def apriltag_component():
         package='apriltag_ros',
         plugin='AprilTagDoubleNode',
         name='apriltag_double_node',
-        parameters=[PARAMS_FILE, get_apriltag_parameters()],
+        parameters=[ensure_params_file(), get_apriltag_parameters()],
         remappings=[('/image_rect', image_topic),
                     ('/camera_info', camera_info_topic)],
     )
