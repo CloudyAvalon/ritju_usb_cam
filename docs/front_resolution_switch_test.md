@@ -58,8 +58,25 @@ Each restart is one line:
 | `interval` | `8.0` | seconds each instance stays up |
 | `cycles` | `0` | restarts to run, `0` = until Ctrl-C |
 | `pixel_format` | empty | override the params-file fourcc |
+| `io_method` | empty | override `io_method` (e.g. `userptr`) |
+| `pub_raw` | `true` | publish `<node_name>/image_raw` for the test |
+| `pub_compressed` | `true` | publish `<node_name>/compressed` |
 | `check_sizeimage` | `true` | query `v4l2-ctl --get-fmt-video` after each stop |
 | `sizeimage_stop_mib` | `100` | stop switching and exit 2 when `Size Image` reaches this many MiB |
+
+The helper starts `usb_cam_node_exe` directly, so it applies the same topic
+remappings as the deployment launch:
+
+```
+<node_name>/image_raw      <- image_raw
+<node_name>/compressed     <- image_raw/compressed
+<node_name>/camera_info    <- camera_info
+```
+
+The front parameter file sets `pub_raw: false` (the deployed recorder uses the
+compressed topic). The test launch overrides `pub_raw`/`pub_compressed` to
+`true`, so both topics exist while testing; set `pub_raw:=false` if you want to
+mimic the deployed configuration exactly.
 
 The node needs ~3 s to settle after opening, so keep `interval` above ~5 s.
 

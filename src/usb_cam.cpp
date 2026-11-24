@@ -41,6 +41,8 @@ extern "C" {
 #include <chrono>
 #include <ctime>
 #include <iostream>
+#include <set>
+#include <tuple>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -67,6 +69,20 @@ UsbCam::UsbCam()
   m_avcodec_context(NULL), m_is_capturing(false), m_framerate(0),
   m_epoch_time_shift_us(usb_cam::utils::get_epoch_time_shift_us()), m_supported_formats()
 {}
+
+void UsbCam::log(log_level_t level, const std::string & msg) const
+{
+  if (m_logger) {
+    m_logger(level, msg);
+    return;
+  }
+  // Standalone fallback (unit tests, library users without a ROS logger).
+  const bool to_stderr =
+    level == log_level_t::WARN || level == log_level_t::WARN_THROTTLE ||
+    level == log_level_t::ERROR;
+  std::ostream & stream = to_stderr ? std::cerr : std::cout;
+  stream << msg << std::endl;
+}
 
 UsbCam::~UsbCam()
 {
@@ -376,6 +392,11 @@ void UsbCam::init_mmap()
   req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req.memory = V4L2_MEMORY_MMAP;
 
+  log(
+    log_level_t::INFO,
+    "usb_cam: requesting " + std::to_string(m_number_of_buffers) +
+    " mmap buffers via VIDIOC_REQBUFS");
+
   if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_REQBUFS), &req)) {
     if (EINVAL == errno) {
       throw std::runtime_error("Device does not support memory mapping");
@@ -387,6 +408,9 @@ void UsbCam::init_mmap()
   if (req.count < m_number_of_buffers) {
     throw std::overflow_error("Insufficient buffer memory on device");
   }
+  log(
+    log_level_t::INFO,
+    "usb_cam: VIDIOC_REQBUFS returned " + std::to_string(req.count) + " buffers");
 
   if (!m_buffers) {
     throw std::overflow_error("Out of memory");
@@ -405,6 +429,10 @@ void UsbCam::init_mmap()
       throw std::runtime_error("Unable to query status of buffer");
     }
 
+    log(
+      log_level_t::INFO,
+      "usb_cam: QUERYBUF[" + std::to_string(current_buffer) + "] length=" +
+      std::to_string(buf.length) + " bytes");
     if (buf.length == 0 || buf.length > usb_cam::utils::kAbsSizeimageCap) {
       throw std::runtime_error(
               "Driver reported buffer length " + std::to_string(buf.length) +
@@ -552,15 +580,35 @@ void UsbCam::init_device()
               "Driver reported implausible geometry " + std::to_string(pix.width) + "x" +
               std::to_string(pix.height) + "; refusing VIDIOC_REQBUFS");
     }
-    const std::string sizeimage_error =
+    std::string sizeimage_error =
       usb_cam::utils::sizeimage_error(pix.sizeimage, pix.width, pix.height, pix.pixelformat);
+    if (sizeimage_error.empty() && m_io == io_method_t::IO_METHOD_MMAP) {
+      // A zero sizeimage is "legal" for the driver, but for MMAP the kernel
+      // then derives the buffer size from the driver's internal format.  When
+      // that state is corrupt it allocates an enormous buffer at REQBUFS;
+      // refuse instead of letting it OOM.
+      if (pix.sizeimage == 0) {
+        sizeimage_error = "sizeimage is 0 for mmap; refusing VIDIOC_REQBUFS";
+      } else if (pix.bytesperline > 0) {
+        const size_t implied = static_cast<size_t>(pix.bytesperline) * pix.height;
+        const size_t bound =
+          usb_cam::utils::sizeimage_bound(pix.width, pix.height, pix.pixelformat);
+        if (bound > 0 && implied > bound) {
+          sizeimage_error =
+            "bytesperline " + std::to_string(pix.bytesperline) + " x height " +
+            std::to_string(pix.height) + " implies " + std::to_string(implied) +
+            " bytes, above bound " + std::to_string(bound) +
+            "; refusing VIDIOC_REQBUFS";
+        }
+      }
+    }
     if (sizeimage_error.empty()) {
       break;
     }
     if (attempt == 2) {
       throw std::runtime_error(sizeimage_error + "; refusing VIDIOC_REQBUFS");
     }
-    std::cerr << "usb_cam: " << sizeimage_error << "; retrying VIDIOC_S_FMT" << std::endl;
+    log(log_level_t::WARN, "usb_cam: " + sizeimage_error + "; retrying VIDIOC_S_FMT");
     m_image.v4l2_fmt.fmt.pix.width = m_image.width;
     m_image.v4l2_fmt.fmt.pix.height = m_image.height;
     m_image.v4l2_fmt.fmt.pix.pixelformat = target_fourcc;
@@ -569,6 +617,13 @@ void UsbCam::init_device()
       throw strerror(errno);
     }
   }
+  log(
+    log_level_t::INFO,
+    "usb_cam: negotiated " + std::to_string(m_image.v4l2_fmt.fmt.pix.width) + "x" +
+    std::to_string(m_image.v4l2_fmt.fmt.pix.height) + " fourcc=" +
+    usb_cam::utils::fourcc_string(m_image.v4l2_fmt.fmt.pix.pixelformat) +
+    " sizeimage=" + std::to_string(m_image.v4l2_fmt.fmt.pix.sizeimage) +
+    " bytesperline=" + std::to_string(m_image.v4l2_fmt.fmt.pix.bytesperline));
   if (m_image.v4l2_fmt.fmt.pix.width != m_image.width ||
     m_image.v4l2_fmt.fmt.pix.height != m_image.height)
   {
@@ -718,49 +773,94 @@ bool UsbCam::get_image(char * destination)
 
 std::vector<capture_format_t> UsbCam::get_supported_formats()
 {
+  // A broken UVC stack can keep answering ENUM_FMT / ENUM_FRAMESIZES /
+  // ENUM_FRAMEINTERVALS with success for ever-increasing indices.  Without
+  // caps this push_back loop grows until the host OOMs right after the
+  // "This device supports the following formats:" line.
+  constexpr uint32_t kMaxFormats = 32;
+  constexpr uint32_t kMaxSizes = 64;
+  constexpr uint32_t kMaxIntervals = 32;
+  constexpr size_t kMaxEntries = 256;
+
+  std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>> seen;
+
   m_supported_formats.clear();
-  struct v4l2_fmtdesc * current_format = new v4l2_fmtdesc();
-  struct v4l2_frmsizeenum * current_size = new v4l2_frmsizeenum();
-  struct v4l2_frmivalenum * current_interval = new v4l2_frmivalenum();
+  log(log_level_t::INFO, "usb_cam: enumerating supported formats");
 
-  current_format->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  current_format->index = 0;
-  for (current_format->index = 0;
-    usb_cam::utils::xioctl(
-      m_fd, VIDIOC_ENUM_FMT, current_format) == 0;
-    ++current_format->index)
-  {
-    current_size->index = 0;
-    current_size->pixel_format = current_format->pixelformat;
-
-    for (current_size->index = 0;
-      usb_cam::utils::xioctl(
-        m_fd, VIDIOC_ENUM_FRAMESIZES, current_size) == 0;
-      ++current_size->index)
+  v4l2_fmtdesc current_format{};
+  current_format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  for (uint32_t format_index = 0; format_index < kMaxFormats; ++format_index) {
+    current_format.index = format_index;
+    current_format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (usb_cam::utils::xioctl(
+        m_fd, static_cast<int>(VIDIOC_ENUM_FMT), &current_format) != 0)
     {
-      current_interval->index = 0;
-      current_interval->pixel_format = current_size->pixel_format;
-      current_interval->width = current_size->discrete.width;
-      current_interval->height = current_size->discrete.height;
-      for (current_interval->index = 0;
-        usb_cam::utils::xioctl(
-          m_fd, VIDIOC_ENUM_FRAMEINTERVALS, current_interval) == 0;
-        ++current_interval->index)
+      break;
+    }
+
+    v4l2_frmsizeenum current_size{};
+    current_size.pixel_format = current_format.pixelformat;
+    for (uint32_t size_index = 0; size_index < kMaxSizes; ++size_index) {
+      current_size.index = size_index;
+      current_size.pixel_format = current_format.pixelformat;
+      if (usb_cam::utils::xioctl(
+          m_fd, static_cast<int>(VIDIOC_ENUM_FRAMESIZES), &current_size) != 0)
       {
-        if (current_interval->type == V4L2_FRMIVAL_TYPE_DISCRETE) {
-          capture_format_t capture_format;
-          capture_format.format = *current_format;
-          capture_format.v4l2_fmt = *current_interval;
-          m_supported_formats.push_back(capture_format);
+        break;
+      }
+      if (current_size.type != V4L2_FRMSIZE_TYPE_DISCRETE) {
+        continue;
+      }
+
+      v4l2_frmivalenum current_interval{};
+      current_interval.pixel_format = current_size.pixel_format;
+      current_interval.width = current_size.discrete.width;
+      current_interval.height = current_size.discrete.height;
+      for (uint32_t interval_index = 0; interval_index < kMaxIntervals; ++interval_index) {
+        current_interval.index = interval_index;
+        current_interval.pixel_format = current_size.pixel_format;
+        current_interval.width = current_size.discrete.width;
+        current_interval.height = current_size.discrete.height;
+        if (usb_cam::utils::xioctl(
+            m_fd, static_cast<int>(VIDIOC_ENUM_FRAMEINTERVALS), &current_interval) != 0)
+        {
+          break;
         }
+        if (current_interval.type != V4L2_FRMIVAL_TYPE_DISCRETE) {
+          continue;
+        }
+        const auto key = std::make_tuple(
+          current_format.pixelformat,
+          static_cast<uint32_t>(current_size.discrete.width),
+          static_cast<uint32_t>(current_size.discrete.height),
+          static_cast<uint32_t>(current_interval.discrete.numerator),
+          static_cast<uint32_t>(current_interval.discrete.denominator));
+        if (!seen.insert(key).second) {
+          log(
+            log_level_t::WARN,
+            "usb_cam: duplicate mode during enumeration "
+            "(driver ignores the index); stopping");
+          return m_supported_formats;
+        }
+        if (m_supported_formats.size() >= kMaxEntries) {
+          log(
+            log_level_t::WARN,
+            "usb_cam: format enumeration hit the " +
+            std::to_string(kMaxEntries) + "-entry cap; ignoring the rest");
+          return m_supported_formats;
+        }
+        capture_format_t capture_format{};
+        capture_format.format = current_format;
+        capture_format.v4l2_fmt = current_interval;
+        m_supported_formats.push_back(capture_format);
       }  // interval loop
     }  // size loop
   }  // fmt loop
 
-  delete (current_format);
-  delete (current_size);
-  delete (current_interval);
-
+  log(
+    log_level_t::INFO,
+    "usb_cam: enumerated " + std::to_string(m_supported_formats.size()) +
+    " capture modes");
   return m_supported_formats;
 }
 
@@ -785,12 +885,14 @@ bool UsbCam::grab_image()
       return false;
     }
 
-    std::cerr << "Something went wrong, exiting..." << errno << std::endl;
+    log(
+      log_level_t::ERROR,
+      "Something went wrong, exiting... errno=" + std::to_string(errno));
     throw errno;
   }
 
   if (0 == r) {
-    std::cerr << "Select timeout, exiting..." << std::endl;
+    log(log_level_t::ERROR, "Select timeout, exiting...");
     throw "select timeout";
   }
 
@@ -808,14 +910,14 @@ bool UsbCam::set_auto_focus(int value)
 
   if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_QUERYCTRL), &queryctrl)) {
     if (errno != EINVAL) {
-      std::cerr << "VIDIOC_QUERYCTRL" << std::endl;
+      log(log_level_t::ERROR, "VIDIOC_QUERYCTRL");
       return false;
     } else {
-      std::cerr << "V4L2_CID_FOCUS_AUTO is not supported" << std::endl;
+      log(log_level_t::WARN, "V4L2_CID_FOCUS_AUTO is not supported");
       return false;
     }
   } else if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED) {
-    std::cerr << "V4L2_CID_FOCUS_AUTO is not supported" << std::endl;
+    log(log_level_t::WARN, "V4L2_CID_FOCUS_AUTO is not supported");
     return false;
   } else {
     memset(&control, 0, sizeof(control));
@@ -823,7 +925,7 @@ bool UsbCam::set_auto_focus(int value)
     control.value = value;
 
     if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_CTRL), &control)) {
-      std::cerr << "VIDIOC_S_CTRL" << std::endl;
+      log(log_level_t::ERROR, "VIDIOC_S_CTRL");
       return false;
     }
   }
@@ -857,7 +959,7 @@ bool UsbCam::set_v4l_parameter(const std::string & param, int value)
   // Look up control ID
   auto it = param_map.find(param);
   if (it == param_map.end()) {
-    std::cerr << "usb_cam: unknown parameter '" << param << "'" << std::endl;
+    log(log_level_t::WARN, "usb_cam: unknown parameter '" + param + "'");
     return false;
   }
   int control_id = it->second;
@@ -867,7 +969,9 @@ bool UsbCam::set_v4l_parameter(const std::string & param, int value)
   CLEAR(query);
   query.id = control_id;
   if (ioctl(m_fd, VIDIOC_QUERYCTRL, &query) < 0) {
-    std::cerr << "usb_cam: parameter '" << param << "' not supported by device" << std::endl;
+    log(
+      log_level_t::WARN,
+      "usb_cam: parameter '" + param + "' not supported by device");
     return false;
   }
 
@@ -882,7 +986,9 @@ bool UsbCam::set_v4l_parameter(const std::string & param, int value)
   ctrl.id = control_id;
   ctrl.value = clamped;
   if (ioctl(m_fd, VIDIOC_S_CTRL, &ctrl) < 0) {
-    std::cerr << "usb_cam: failed to set '" << param << "' to " << clamped << std::endl;
+    log(
+      log_level_t::WARN,
+      "usb_cam: failed to set '" + param + "' to " + std::to_string(clamped));
     return false;
   }
 
@@ -902,8 +1008,9 @@ bool UsbCam::set_v4l_parameter(const std::string & param, const std::string & va
     int int_value = std::stoi(value);
     return set_v4l_parameter(param, int_value);
   } catch (const std::exception & e) {
-    std::cerr << "usb_cam: invalid value '" << value << "' for parameter '" << param << "'" <<
-      std::endl;
+    log(
+      log_level_t::ERROR,
+      "usb_cam: invalid value '" + value + "' for parameter '" + param + "'");
     return false;
   }
 }

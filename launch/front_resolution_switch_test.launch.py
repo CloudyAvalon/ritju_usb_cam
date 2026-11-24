@@ -52,7 +52,7 @@ def generate_launch_description():
             'high_res', default_value='1280x1024',
             description='second resolution of the alternation'),
         DeclareLaunchArgument(
-            'interval', default_value='4.0',
+            'interval', default_value='8.0',
             description='seconds each node instance stays up'),
         DeclareLaunchArgument(
             'cycles', default_value='0',
@@ -67,6 +67,15 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'sizeimage_stop_mib', default_value='100',
             description='stop switching when Size Image reaches this many MiB'),
+        DeclareLaunchArgument(
+            'io_method', default_value='',
+            description='override io_method (e.g. userptr for a safe test)'),
+        DeclareLaunchArgument(
+            'pub_raw', default_value='true',
+            description='publish <node_name>/image_raw (test default true)'),
+        DeclareLaunchArgument(
+            'pub_compressed', default_value='true',
+            description='publish <node_name>/compressed'),
         ExecuteProcess(
             cmd=[
                 'ros2', 'run', 'usb_cam', 'usb_cam_resolution_switch_test',
@@ -81,6 +90,9 @@ def generate_launch_description():
                 '--check-sizeimage', LaunchConfiguration('check_sizeimage'),
                 '--sizeimage-stop-mib',
                 LaunchConfiguration('sizeimage_stop_mib'),
+                '--io-method', LaunchConfiguration('io_method'),
+                '--pub-raw', LaunchConfiguration('pub_raw'),
+                '--pub-compressed', LaunchConfiguration('pub_compressed'),
             ],
             output='screen',
         ),

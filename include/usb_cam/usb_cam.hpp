@@ -43,6 +43,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
+#include "usb_cam/logging.hpp"
 #include "usb_cam/utils.hpp"
 #include "usb_cam/formats/pixel_format_base.hpp"
 #include "usb_cam/formats/av_pixel_format_helper.hpp"
@@ -252,6 +253,9 @@ public:
   /// @brief Enable/disable the driver payload sanity checks (default enabled)
   void set_frame_sanity_enabled(bool enabled) {m_frame_sanity_enabled = enabled;}
 
+  /// @brief Route library diagnostics to a ROS logger (rclcpp-free sink).
+  inline void set_logger(log_fn_t fn) {m_logger = std::move(fn);}
+
   std::vector<capture_format_t> get_supported_formats();
 
   // enables/disable auto focus
@@ -384,22 +388,26 @@ public:
 
     if (found_driver_format == nullptr) {
       // List the supported formats of this driver for the user before throwing
-      std::cerr << "This driver supports the following formats:" << std::endl;
+      log(log_level_t::WARN, "This driver supports the following formats:");
       for (auto driver_fmt : driver_supported_formats(args)) {
-        std::cerr << "\t" << driver_fmt->name() << std::endl;
+        log(log_level_t::WARN, "\t" + driver_fmt->name());
       }
       throw std::invalid_argument(
               "Specified format `" + args.name + "` is unsupported by this ROS driver"
       );
     }
 
-    std::cout << "This device supports the following formats:" << std::endl;
+    log(log_level_t::INFO, "This device supports the following formats:");
     for (auto fmt : this->supported_formats()) {
       // Always list the devices supported formats for the user
-      std::cout << "\t" << fmt.format.description << " ";
-      std::cout << fmt.v4l2_fmt.width << " x " << fmt.v4l2_fmt.height << " (";
-      std::cout << fmt.v4l2_fmt.discrete.denominator / fmt.v4l2_fmt.discrete.numerator << " Hz)";
-      std::cout << std::endl;
+      log(
+        log_level_t::INFO,
+        "\t" + std::string(reinterpret_cast<const char *>(fmt.format.description)) + " " +
+        std::to_string(fmt.v4l2_fmt.width) + " x " +
+        std::to_string(fmt.v4l2_fmt.height) + " (" +
+        std::to_string(
+          fmt.v4l2_fmt.discrete.denominator /
+          fmt.v4l2_fmt.discrete.numerator) + " Hz)");
 
       if (fmt.v4l2_fmt.pixel_format == found_driver_format->v4l2()) {
         result = true;
@@ -450,6 +458,7 @@ private:
 
   void uninit_device();
   void close_device();
+  void log(log_level_t level, const std::string & msg) const;
 
   std::string m_device_name;
   usb_cam::utils::io_method_t m_io;
@@ -459,6 +468,7 @@ private:
   image_t m_image;
   std::string m_last_frame_error;
   bool m_frame_sanity_enabled{true};
+  log_fn_t m_logger;
 
   AVFrame * m_avframe;
   AVCodec * m_avcodec;

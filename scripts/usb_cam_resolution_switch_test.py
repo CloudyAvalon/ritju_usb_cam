@@ -55,6 +55,24 @@ def node_command(args, width, height):
     ]
     if args.pixel_format:
         command += ['-p', f'pixel_format:={args.pixel_format}']
+    if args.io_method:
+        command += ['-p', f'io_method:={args.io_method}']
+    if args.pub_raw is not None:
+        command += ['-p', f'pub_raw:={str(args.pub_raw).lower()}']
+    if args.pub_compressed is not None:
+        command += ['-p', f'pub_compressed:={str(args.pub_compressed).lower()}']
+
+    # The deployment launches remap these topics into the <node_name>/ namespace.
+    # Without them the node publishes /image_raw and /camera_info at the root,
+    # so watching /rgb_camera_front/... looks like "no image".
+    prefix = args.node_name
+    command += [
+        '-r', f'image_raw:={prefix}/image_raw',
+        '-r', f'image_raw/compressed:={prefix}/compressed',
+        '-r', f'image_raw/compressedDepth:={prefix}/compressedDepth',
+        '-r', f'image_raw/theora:={prefix}/image_raw/theora',
+        '-r', f'camera_info:={prefix}/camera_info',
+    ]
     return command
 
 
@@ -151,6 +169,12 @@ def main(argv=None):
                         help='seconds between instances (default 1.5)')
     parser.add_argument('--pixel-format', default='',
                         help='override pixel_format (default: from params file)')
+    parser.add_argument('--io-method', default='',
+                        help='override io_method, e.g. userptr for a safe test')
+    parser.add_argument('--pub-raw', type=str2bool, default=True,
+                        help='publish image_raw (default true for the test)')
+    parser.add_argument('--pub-compressed', type=str2bool, default=True,
+                        help='publish compressed image (default true)')
     parser.add_argument('--check-sizeimage', type=str2bool, default=True,
                         metavar='BOOL',
                         help='query v4l2-ctl after each stop (default true)')

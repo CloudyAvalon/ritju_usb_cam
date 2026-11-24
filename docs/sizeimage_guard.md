@@ -32,7 +32,11 @@ After `VIDIOC_S_FMT`, `init_device()` now:
    - `expected = width * height * device_bpp` (MJPG 3, YUYV/UYVY/YUV420 2,
      GREY 1, default 3);
    - `bound = min(expected * 4, 64 MiB)`;
-   - `sizeimage == 0` is legal;
+   - `sizeimage == 0` is legal for the driver, but **rejected for mmap** after
+     the S_FMT retries: the kernel would derive the buffer size from the
+     driver's internal format, which is exactly the corrupt state that causes
+     OOM;
+   - `bytesperline * height` is also checked against the bound for mmap;
    - values above `0xF0000000` are uint32 garbage;
 4. retries `VIDIOC_S_FMT` up to three times (the S_FMT kick heals the transient
    case);
@@ -70,6 +74,7 @@ The same input-validation pass also covers the remaining buffers:
 | `m_image_msg->data.resize()` | `get_image_size_in_bytes()` | bounded by the library limit; the old `sizeof(std::vector)` test (always true) was replaced by `.size()` |
 | `init_userp()` `memalign()` ×4 | `size_in_bytes` | overflow check; size already capped |
 | `init_mmap()` `mmap(buf.length)` | driver `QUERYBUF.length` | 0 or > 64 MiB → `refusing mmap` |
+| `VIDIOC_REQBUFS` (mmap) | driver `sizeimage` / internal format | zero or implied `bytesperline*height` above bound → refused; logs `requesting`, `REQBUFS returned N`, `QUERYBUF[i] length=...` |
 | `process_image()` / MJPEG decoder `bytes_used` | driver `bytesused` | payload bounds check is now **unconditional**; only the SOI heuristic remains behind `frame_sanity_check` |
 | `undistortImage()` maps / GpuMat | message geometry | indirectly bounded by the 128 MiB image cap (maps add ~2.7× that size) |
 | `get_supported_formats()` `new` | fixed-size structs | no external input |
@@ -82,3 +87,30 @@ separate fix.
 Limits are conservative: a 1280×1024 RGB frame is ~3.9 MiB, and the largest
 deployed mode is well below 64 MiB. `kMaxImageBytes` is 128 MiB; the driver
 payload cap is 64 MiB.
+
+## OOM after "This device supports the following formats:"
+
+That line is printed by `set_pixel_format()` immediately before it calls
+`supported_formats()` → `UsbCam::get_supported_formats()`, which enumerates
+`VIDIOC_ENUM_FMT` / `ENUM_FRAMESIZES` / `ENUM_FRAMEINTERVALS`.  A wedged UVC
+stack can ignore the increasing index and keep returning success, so the
+`push_back` loop grows the mode vector until the host OOMs, with no further
+log line.
+
+`get_supported_formats()` now:
+
+- caps formats / sizes / intervals / total entries (32 / 64 / 32 / 256);
+- stops when the same `(fourcc, width, height, numerator, denominator)` mode
+  is enumerated twice (the "driver ignores the index" case);
+- logs `usb_cam: enumerating supported formats` and
+  `usb_cam: enumerated N capture modes` (or a cap/duplicate warning).
+
+Two more diagnostics were added on the open path:
+
+```
+usb_cam: negotiated 1280x1024 fourcc=MJPG sizeimage=... bytesperline=...
+usb_cam: requesting 4 mmap buffers via VIDIOC_REQBUFS
+```
+
+If a future OOM happens again, the last line before it now identifies the
+stage: enumeration, negotiated format, or buffer request.
