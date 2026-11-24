@@ -183,12 +183,29 @@ typedef struct image_t
   }
   size_t set_bytes_per_line()
   {
-    bytes_per_line = width * pixel_format->byte_depth() * pixel_format->channels();
+    const size_t depth = pixel_format->byte_depth();
+    const size_t channels = pixel_format->channels();
+    if (width == 0 || height == 0 || depth == 0 || channels == 0) {
+      throw std::invalid_argument("invalid image geometry or pixel format");
+    }
+    if (width > std::numeric_limits<size_t>::max() / depth / channels) {
+      throw std::overflow_error("bytes-per-line overflow");
+    }
+    bytes_per_line = width * depth * channels;
     return bytes_per_line;
   }
   size_t set_size_in_bytes()
   {
+    if (height > std::numeric_limits<size_t>::max() / bytes_per_line) {
+      throw std::overflow_error("image byte size overflow");
+    }
     size_in_bytes = height * bytes_per_line;
+    if (size_in_bytes > usb_cam::utils::kMaxImageBytes) {
+      throw std::out_of_range(
+              "image " + std::to_string(width) + "x" + std::to_string(height) +
+              " needs " + std::to_string(size_in_bytes) + " bytes, above the " +
+              std::to_string(usb_cam::utils::kMaxImageBytes) + "-byte limit");
+    }
     return size_in_bytes;
   }
 

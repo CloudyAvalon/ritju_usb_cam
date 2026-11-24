@@ -52,7 +52,7 @@ def generate_launch_description():
             'high_res', default_value='1280x1024',
             description='second resolution of the alternation'),
         DeclareLaunchArgument(
-            'interval', default_value='8.0',
+            'interval', default_value='4.0',
             description='seconds each node instance stays up'),
         DeclareLaunchArgument(
             'cycles', default_value='0',
@@ -64,6 +64,9 @@ def generate_launch_description():
             'check_sizeimage', default_value='true',
             description='query v4l2-ctl after each stop and stop on an '
                         'implausible Size Image'),
+        DeclareLaunchArgument(
+            'sizeimage_stop_mib', default_value='100',
+            description='stop switching when Size Image reaches this many MiB'),
         ExecuteProcess(
             cmd=[
                 'ros2', 'run', 'usb_cam', 'usb_cam_resolution_switch_test',
@@ -76,6 +79,8 @@ def generate_launch_description():
                 '--cycles', LaunchConfiguration('cycles'),
                 '--pixel-format', LaunchConfiguration('pixel_format'),
                 '--check-sizeimage', LaunchConfiguration('check_sizeimage'),
+                '--sizeimage-stop-mib',
+                LaunchConfiguration('sizeimage_stop_mib'),
             ],
             output='screen',
         ),

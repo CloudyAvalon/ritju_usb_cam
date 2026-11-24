@@ -21,12 +21,15 @@ import time
 
 RESOLUTION_RE = re.compile(r'^(\d+)x(\d+)$')
 
-# Same bounds as usb_cam/device_preflight (develop):
+# Geometry bound used for the informational warning (develop's preflight):
 #   expected = width * height * device_bpp
 #   bound    = min(expected * 4, 64 MiB), sizeimage == 0 is legal.
 SIZEIMAGE_FACTOR = 4
 SIZEIMAGE_ABS_CAP = 64 * 1024 * 1024
-SIZEIMAGE_GARBAGE = 0xF0000000
+# Stop the switching loop once the driver reports a clearly bogus sizeimage.
+# 100 MiB is far above any healthy frame (a 1280x1024 MJPG buffer is ~4 MiB).
+SIZEIMAGE_STOP_MIB = 100
+SIZEIMAGE_STOP_BYTES = SIZEIMAGE_STOP_MIB * 1024 * 1024
 SIZEIMAGE_BPP = {
     'MJPG': 3, 'JPEG': 3,
     'YUYV': 2, 'UYVY': 2, 'YU12': 2, 'YV12': 2,
@@ -83,19 +86,26 @@ def read_sizeimage(device, v4l2ctl):
     }, ''
 
 
-def sizeimage_reason(info):
-    """Return a reason when the driver-reported sizeimage is implausible."""
+def sizeimage_anomaly(info, stop_bytes=SIZEIMAGE_STOP_BYTES):
+    """Return (reason, should_stop) for the driver-reported sizeimage.
+
+    ``should_stop`` is true once the value reaches ``stop_bytes`` (default
+    100 MiB).  Values that merely exceed the geometry bound are reported as a
+    warning without ending the run, so the loop can reach the large garbage
+    state first.
+    """
     size = info['size']
-    if size > SIZEIMAGE_GARBAGE:
-        return ('sizeimage %d looks like uint32 garbage (%dx%d %s)' %
-                (size, info['width'], info['height'], info['fourcc']))
+    if size >= stop_bytes:
+        return ('sizeimage %d >= %d bytes (%.1f MiB) (%dx%d %s)' %
+                (size, stop_bytes, stop_bytes / (1024.0 * 1024.0),
+                 info['width'], info['height'], info['fourcc'])), True
     bpp = SIZEIMAGE_BPP.get(info['fourcc'].upper(), 3)
     expected = info['width'] * info['height'] * bpp
     bound = min(expected * SIZEIMAGE_FACTOR, SIZEIMAGE_ABS_CAP)
     if size > bound:
-        return ('sizeimage %d exceeds bound %d (%dx%d %s)' %
-                (size, bound, info['width'], info['height'], info['fourcc']))
-    return ''
+        return ('sizeimage %d above geometry bound %d (%dx%d %s)' %
+                (size, bound, info['width'], info['height'], info['fourcc'])), False
+    return '', False
 
 
 def stop_node(process):
@@ -146,6 +156,10 @@ def main(argv=None):
                         help='query v4l2-ctl after each stop (default true)')
     parser.add_argument('--v4l2ctl', default='v4l2-ctl',
                         help='v4l2-ctl binary (default v4l2-ctl)')
+    parser.add_argument('--sizeimage-stop-mib', type=float,
+                        default=SIZEIMAGE_STOP_MIB,
+                        help='stop when Size Image >= this value in MiB '
+                             '(default 100)')
     args = parser.parse_args(argv)
 
     if args.interval <= 3.0:
@@ -203,10 +217,13 @@ def main(argv=None):
                 print(f"[cycle {cycle}] sizeimage={info['size']} "
                       f"({info['width']}x{info['height']} '{info['fourcc']}')",
                       flush=True)
-                reason = sizeimage_reason(info)
+                stop_bytes = args.sizeimage_stop_mib * 1024 * 1024
+                reason, should_stop = sizeimage_anomaly(info, stop_bytes)
                 if reason:
-                    print(f'[cycle {cycle}] ABNORMAL SIZEIMAGE: {reason}',
+                    level = 'ABNORMAL' if should_stop else 'WARNING'
+                    print(f'[cycle {cycle}] {level} SIZEIMAGE: {reason}',
                           flush=True)
+                if should_stop:
                     print('capture stopped; the driver state is left for the '
                           'next usb_cam launch', flush=True)
                     print(f'summary: cycles={cycle} early_exits={early_exits}',

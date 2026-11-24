@@ -23,6 +23,10 @@ The default parameter file is the installed `usb_cam/config/front.yaml`
 
 ## Output
 
+The node now refuses `VIDIOC_REQBUFS` when the driver reports a garbage
+`sizeimage` (see [sizeimage_guard.md](sizeimage_guard.md)), so a bad open fails
+fast with a clear log instead of allocating `4 * sizeimage` bytes.
+
 Each restart is one line:
 
 ```
@@ -36,9 +40,10 @@ Each restart is one line:
   open, or the frame-sanity escalation shutting it down on purpose). This is
   the signal to look at the node log.
 - `sizeimage=...` — after every stop the helper prints the driver-reported
-  `Size Image` from `v4l2-ctl --get-fmt-video`. An implausible value (near
-  2^32 or above `width*height*bpp*4`, capped at 64 MiB) stops the run with
-  exit code 2 and leaves the driver state for the next `usb_cam` launch.
+  `Size Image` from `v4l2-ctl --get-fmt-video`. Values above the geometry
+  bound are reported as `WARNING`; once the value reaches
+  `sizeimage_stop_mib` (default **100 MiB**) the run stops with exit code 2 and
+  leaves the driver state for the next `usb_cam` launch.
 - `summary: cycles=N early_exits=M` at the end.
 
 ## Options
@@ -53,7 +58,8 @@ Each restart is one line:
 | `interval` | `8.0` | seconds each instance stays up |
 | `cycles` | `0` | restarts to run, `0` = until Ctrl-C |
 | `pixel_format` | empty | override the params-file fourcc |
-| `check_sizeimage` | `true` | query `v4l2-ctl --get-fmt-video` after each stop; exit 2 on an implausible `Size Image` |
+| `check_sizeimage` | `true` | query `v4l2-ctl --get-fmt-video` after each stop |
+| `sizeimage_stop_mib` | `100` | stop switching and exit 2 when `Size Image` reaches this many MiB |
 
 The node needs ~3 s to settle after opening, so keep `interval` above ~5 s.
 

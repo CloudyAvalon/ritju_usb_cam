@@ -188,19 +188,21 @@ bool UsbCam::read_frame()
           return false;
         }
 
-        // Driver sanity checks: never decode a payload that cannot be a frame.
-        if (m_frame_sanity_enabled) {
-          std::string error =
-            frame_sanity::payload_error(newest_bytes, m_buffers[newest_index].length);
-          if (error.empty() && m_image.pixel_format->v4l2() == V4L2_PIX_FMT_MJPEG) {
-            error = frame_sanity::mjpeg_soi_error(
-              reinterpret_cast<const unsigned char *>(m_buffers[newest_index].start), newest_bytes);
-          }
-          if (!error.empty()) {
-            m_last_frame_error = error;
-            requeue(static_cast<unsigned int>(newest_index));
-            return false;
-          }
+        // Payload bounds are a memory-safety invariant: enforce them even when
+        // the optional frame sanity checks are disabled.  The SOI check stays
+        // behind the switch because it is heuristic.
+        std::string error =
+          frame_sanity::payload_error(newest_bytes, m_buffers[newest_index].length);
+        if (error.empty() && m_frame_sanity_enabled &&
+          m_image.pixel_format->v4l2() == V4L2_PIX_FMT_MJPEG)
+        {
+          error = frame_sanity::mjpeg_soi_error(
+            reinterpret_cast<const unsigned char *>(m_buffers[newest_index].start), newest_bytes);
+        }
+        if (!error.empty()) {
+          m_last_frame_error = error;
+          requeue(static_cast<unsigned int>(newest_index));
+          return false;
         }
 
         // Decode/copy only the newest frame; a decode failure is a dropped
@@ -403,6 +405,12 @@ void UsbCam::init_mmap()
       throw std::runtime_error("Unable to query status of buffer");
     }
 
+    if (buf.length == 0 || buf.length > usb_cam::utils::kAbsSizeimageCap) {
+      throw std::runtime_error(
+              "Driver reported buffer length " + std::to_string(buf.length) +
+              "; refusing mmap (limit " +
+              std::to_string(usb_cam::utils::kAbsSizeimageCap) + " bytes)");
+    }
     m_buffers[current_buffer].length = buf.length;
     m_buffers[current_buffer].start =
       reinterpret_cast<char *>(mmap(
@@ -421,6 +429,11 @@ void UsbCam::init_userp()
   unsigned int page_size;
 
   page_size = getpagesize();
+  if (m_image.size_in_bytes >
+    std::numeric_limits<size_t>::max() - static_cast<size_t>(page_size - 1))
+  {
+    throw std::overflow_error("user-pointer buffer size overflow");
+  }
   auto buffer_size = (m_image.size_in_bytes + page_size - 1) & ~(page_size - 1);
 
   CLEAR(req);
@@ -522,6 +535,51 @@ void UsbCam::init_device()
     throw strerror(errno);
   }
 
+  // The UVC descriptor bug can report a garbage sizeimage after a resolution
+  // switch.  VIDIOC_REQBUFS makes vb2 allocate `count * sizeimage` bytes, so
+  // validating after REQBUFS is too late: the host OOMs before any frame is
+  // read.  Verify G_FMT here and refuse to request buffers when the value is
+  // implausible; an S_FMT kick heals the transient case.
+  const uint32_t target_fourcc = m_image.v4l2_fmt.fmt.pix.pixelformat;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    m_image.v4l2_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_G_FMT), &m_image.v4l2_fmt)) {
+      throw std::runtime_error("Unable to read the negotiated v4l2 format");
+    }
+    const auto & pix = m_image.v4l2_fmt.fmt.pix;
+    if (pix.width == 0 || pix.height == 0 || pix.width > 16384 || pix.height > 16384) {
+      throw std::runtime_error(
+              "Driver reported implausible geometry " + std::to_string(pix.width) + "x" +
+              std::to_string(pix.height) + "; refusing VIDIOC_REQBUFS");
+    }
+    const std::string sizeimage_error =
+      usb_cam::utils::sizeimage_error(pix.sizeimage, pix.width, pix.height, pix.pixelformat);
+    if (sizeimage_error.empty()) {
+      break;
+    }
+    if (attempt == 2) {
+      throw std::runtime_error(sizeimage_error + "; refusing VIDIOC_REQBUFS");
+    }
+    std::cerr << "usb_cam: " << sizeimage_error << "; retrying VIDIOC_S_FMT" << std::endl;
+    m_image.v4l2_fmt.fmt.pix.width = m_image.width;
+    m_image.v4l2_fmt.fmt.pix.height = m_image.height;
+    m_image.v4l2_fmt.fmt.pix.pixelformat = target_fourcc;
+    m_image.v4l2_fmt.fmt.pix.field = V4L2_FIELD_ANY;
+    if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_FMT), &m_image.v4l2_fmt)) {
+      throw strerror(errno);
+    }
+  }
+  if (m_image.v4l2_fmt.fmt.pix.width != m_image.width ||
+    m_image.v4l2_fmt.fmt.pix.height != m_image.height)
+  {
+    throw std::runtime_error(
+            "Driver changed geometry from " + std::to_string(m_image.width) + "x" +
+            std::to_string(m_image.height) + " to " +
+            std::to_string(m_image.v4l2_fmt.fmt.pix.width) + "x" +
+            std::to_string(m_image.v4l2_fmt.fmt.pix.height) +
+            "; refusing VIDIOC_REQBUFS");
+  }
+
   struct v4l2_streamparm stream_params;
   memset(&stream_params, 0, sizeof(stream_params));
   stream_params.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -593,6 +651,15 @@ void UsbCam::configure(
 {
   m_device_name = parameters.device_name;
   m_io = io_method;
+
+  // Validate user input before opening the device or constructing a pixel
+  // format: the MJPEG decoder allocates AVFrames in its constructor from these
+  // dimensions, and image_t::set_size_in_bytes feeds the node's resize().
+  usb_cam::utils::validate_frame_geometry(
+    parameters.image_width, parameters.image_height, 4);
+  if (parameters.framerate <= 0) {
+    throw std::invalid_argument("framerate must be positive");
+  }
 
   // Open device file descriptor before anything else
   open_device();
