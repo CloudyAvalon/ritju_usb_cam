@@ -36,6 +36,8 @@
   <depend>ffmpeg</depend>
 
   <!-- Only required for the launch file -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
   <exec_depend>python3-pydantic</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
 

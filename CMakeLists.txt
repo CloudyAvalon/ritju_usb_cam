@@ -107,6 +107,14 @@ endif()
 install(
   PROGRAMS scripts/show_image.py
   DESTINATION lib/${PROJECT_NAME})
+install(
+  PROGRAMS scripts/topic_latency_probe.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME topic_latency_probe)
+install(
+  PROGRAMS scripts/usb_cam_resolution_switch_test.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME usb_cam_resolution_switch_test)
 
 install(TARGETS
   ${PROJECT_NAME}
