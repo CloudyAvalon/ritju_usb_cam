@@ -132,6 +132,7 @@ typedef struct parameters_t
   bool pub_compressed;
   bool frame_sanity_check;
   bool set_framerate;
+  double publish_rate;
 
   parameters_t()
 // *INDENT-OFF*
@@ -161,7 +162,8 @@ typedef struct parameters_t
     pub_raw(true),
     pub_compressed(true),
     frame_sanity_check(true),
-    set_framerate(true)
+    set_framerate(true),
+    publish_rate(0.0)
   {
   }
 // *INDENT-ON*

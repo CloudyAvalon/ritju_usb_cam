@@ -80,6 +80,9 @@ def generate_launch_description():
             'set_framerate', default_value='true',
             description='call VIDIOC_S_PARM (false skips the UVC commit path)'),
         DeclareLaunchArgument(
+            'publish_rate', default_value='0.0',
+            description='publish timer rate in Hz; 0 = use framerate'),
+        DeclareLaunchArgument(
             'check_framerate', default_value='true',
             description='query v4l2-ctl --get-parm after each stop'),
         DeclareLaunchArgument(
@@ -111,6 +114,7 @@ def generate_launch_description():
                 '--pub-raw', LaunchConfiguration('pub_raw'),
                 '--pub-compressed', LaunchConfiguration('pub_compressed'),
                 '--set-framerate', LaunchConfiguration('set_framerate'),
+                '--publish-rate', LaunchConfiguration('publish_rate'),
                 '--retry-delay', LaunchConfiguration('retry_delay'),
                 '--max-retry-delay', LaunchConfiguration('max_retry_delay'),
             ],

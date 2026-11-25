@@ -210,6 +210,13 @@ inline size_t validate_frame_geometry(int width, int height, size_t bytes_per_pi
   return bytes;
 }
 
+/// @brief Publish rate used by the node timer: explicit publish_rate wins,
+/// otherwise fall back to the device framerate (legacy behaviour).
+inline double effective_publish_rate(double framerate, double publish_rate)
+{
+  return (publish_rate > 0.0) ? publish_rate : framerate;
+}
+
 /// @brief True when the device already runs at the requested frame rate.
 /// @param tolerance absolute fps difference that counts as "same" (0.1 fps).
 inline bool framerate_matches(double current_fps, int requested_fps, double tolerance = 0.1)

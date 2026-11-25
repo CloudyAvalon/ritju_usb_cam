@@ -68,6 +68,7 @@ Each restart is one line:
 | `pixel_format` | empty | override the params-file fourcc |
 | `io_method` | empty | override `io_method` (e.g. `userptr`) |
 | `set_framerate` | `true` | call `VIDIOC_S_PARM`; set `false` to skip the UVC commit path |
+| `publish_rate` | `0.0` | publish timer Hz; `0` = use the configured `framerate` |
 | `retry_delay` | `10.0` | first wait after an EARLY_EXIT (node failed to start/stream) |
 | `max_retry_delay` | `60.0` | cap for the exponential retry backoff |
 | `pub_raw` | `true` | publish `<node_name>/image_raw` for the test |

@@ -26,6 +26,7 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
+#include <cmath>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -85,6 +86,7 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions& node_options)
   this->declare_parameter("pub_compressed", true);
   this->declare_parameter("frame_sanity_check", true);
   this->declare_parameter("set_framerate", true);
+  this->declare_parameter("publish_rate", 0.0);
   this->declare_parameter("frame_sanity_max_consecutive", 10);
 
   get_params();
@@ -278,12 +280,30 @@ void UsbCamNode::init()
     return;
   }
 
-  // TODO(lucasw) should this check a little faster than expected frame rate?
-  // TODO(lucasw) how to do small than ms, or fractional ms- std::chrono::nanoseconds?
-  const int period_ms = 1000.0 / m_parameters.framerate;
-  m_timer = this->create_wall_timer(std::chrono::milliseconds(static_cast<int64_t>(period_ms)),
+  // Publish/capture timer is independent from the device frame interval:
+  // publish_rate wins when set, otherwise keep the legacy framerate behaviour.
+  const double publish_rate = usb_cam::utils::effective_publish_rate(
+    static_cast<double>(m_parameters.framerate), m_parameters.publish_rate);
+  if (!(publish_rate > 0.0) || !std::isfinite(publish_rate) ||
+    publish_rate > 1000.0)
+  {
+    RCLCPP_ERROR(this->get_logger(), "Invalid publish_rate %f (framerate %d)",
+                 publish_rate, m_parameters.framerate);
+    m_camera->shutdown();
+    rclcpp::shutdown();
+    return;
+  }
+  const int64_t period_ms = static_cast<int64_t>(1000.0 / publish_rate);
+  if (period_ms <= 0) {
+    RCLCPP_ERROR(this->get_logger(), "publish_rate %f gives a zero timer period", publish_rate);
+    m_camera->shutdown();
+    rclcpp::shutdown();
+    return;
+  }
+  m_timer = this->create_wall_timer(std::chrono::milliseconds(period_ms),
                                     std::bind(&UsbCamNode::update, this));
-  RCLCPP_INFO_STREAM(this->get_logger(), "Timer triggering every " << period_ms << " ms");
+  RCLCPP_INFO(this->get_logger(), "Publishing at %.3f Hz (device framerate %d)", publish_rate,
+              m_parameters.framerate);
 }
 
 void UsbCamNode::get_params()
@@ -298,7 +318,8 @@ void UsbCamNode::get_params()
                                                         "exposure",           "autofocus",           "focus",
                                                         "undistort_image",    "undistort_image_gpu", "pub_raw",
                                                         "pub_compressed",     "frame_sanity_check",
-                                                        "frame_sanity_max_consecutive", "set_framerate" });
+                                                        "frame_sanity_max_consecutive", "set_framerate",
+                                                        "publish_rate" });
 
   assign_params(parameters);
 }
@@ -416,6 +437,10 @@ void UsbCamNode::assign_params(const std::vector<rclcpp::Parameter>& parameters)
     else if (parameter.get_name() == "set_framerate")
     {
       m_parameters.set_framerate = parameter.as_bool();
+    }
+    else if (parameter.get_name() == "publish_rate")
+    {
+      m_parameters.publish_rate = parameter.as_double();
     }
     else if (parameter.get_name() == "focus")
     {

@@ -20,6 +20,7 @@
 #include "usb_cam/utils.hpp"
 
 using usb_cam::utils::fourcc_string;
+using usb_cam::utils::effective_publish_rate;
 using usb_cam::utils::framerate_matches;
 using usb_cam::utils::sizeimage_bound;
 using usb_cam::utils::sizeimage_error;
@@ -110,4 +111,16 @@ TEST(FramerateMatch, RejectsLargerDifference)
   EXPECT_FALSE(framerate_matches(30.0, 15));
   EXPECT_FALSE(framerate_matches(0.0, 15));
   EXPECT_FALSE(framerate_matches(15.0, 0));
+}
+
+TEST(PublishRate, FallsBackToFramerate)
+{
+  EXPECT_DOUBLE_EQ(effective_publish_rate(15.0, 0.0), 15.0);
+  EXPECT_DOUBLE_EQ(effective_publish_rate(30.0, 0.0), 30.0);
+}
+
+TEST(PublishRate, ExplicitValueWins)
+{
+  EXPECT_DOUBLE_EQ(effective_publish_rate(30.0, 10.0), 10.0);
+  EXPECT_DOUBLE_EQ(effective_publish_rate(15.0, 30.0), 30.0);
 }

@@ -2,6 +2,7 @@
     ros__parameters:
       video_device: "/dev/rgb_camera_front"
       framerate: 15.0
+      # publish_rate: 10.0  # optional; defaults to framerate when absent
       io_method: "mmap"
       frame_id: "camera"
       pixel_format: "mjpeg2rgb"  # see usb_cam/supported_formats for list of supported formats

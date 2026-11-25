@@ -63,6 +63,8 @@ def node_command(args, width, height):
         command += ['-p', f'pub_compressed:={str(args.pub_compressed).lower()}']
     if args.set_framerate is not None:
         command += ['-p', f'set_framerate:={str(args.set_framerate).lower()}']
+    if args.publish_rate > 0.0:
+        command += ['-p', f'publish_rate:={args.publish_rate}']
 
     # The deployment launches remap these topics into the <node_name>/ namespace.
     # Without them the node publishes /image_raw and /camera_info at the root,
@@ -206,6 +208,8 @@ def main(argv=None):
     parser.add_argument('--set-framerate', type=str2bool, default=True,
                         help='call VIDIOC_S_PARM (default true; false bypasses '
                              'the UVC commit path)')
+    parser.add_argument('--publish-rate', type=float, default=0.0,
+                        help='override publish_rate; 0 = use framerate')
     parser.add_argument('--check-sizeimage', type=str2bool, default=True,
                         metavar='BOOL',
                         help='query v4l2-ctl after each stop (default true)')
