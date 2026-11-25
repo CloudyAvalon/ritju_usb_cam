@@ -152,3 +152,27 @@ Two additional diagnostics/hooks were added:
 
 `ffplay`/FFmpeg use a different V4L2 open/read path and do not perform this
 exact `usb_cam` sequence, which is why they can still show an image.
+
+## Frame-rate guard before VIDIOC_S_PARM
+
+`init_device()` now reads the current interval with `VIDIOC_G_PARM` before
+committing:
+
+```
+usb_cam: current framerate 15.000000 fps, requested 15
+usb_cam: framerate already matches within 0.1 fps; skipping VIDIOC_S_PARM
+```
+
+- `|current_fps - requested_fps| < 0.1` → skip S_PARM (no UVC probe/commit);
+- the device does not advertise `V4L2_CAP_TIMEPERFRAME` → skip S_PARM;
+- otherwise set `timeperframe = 1/requested` and commit as before;
+- `set_framerate:=false` still skips the whole block.
+
+Node restarts therefore do not repeatedly commit the frame interval when the
+device already runs at the requested rate, which is the state that triggers
+the corrupted `dwMaxVideoFrameSize` in the first place. The comparison uses
+milli-fps rounding so the exact 0.1 boundary is not affected by floating point
+(15.1 vs 15 counts as different).
+
+The helper prints the device's `--get-parm` value after every stop, so this
+guard can be verified together with `check_framerate`.

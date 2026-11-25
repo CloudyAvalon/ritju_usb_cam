@@ -676,33 +676,50 @@ void UsbCam::init_device()
       throw strerror(errno);
     }
 
-    if (!stream_params.parm.capture.capability && V4L2_CAP_TIMEPERFRAME) {
-      throw "V4L2_CAP_TIMEPERFRAME not supported";
-    }
+    const auto & tpf = stream_params.parm.capture.timeperframe;
+    const double current_fps =
+      (tpf.numerator > 0) ? static_cast<double>(tpf.denominator) / tpf.numerator : 0.0;
+    log(
+      log_level_t::INFO,
+      "usb_cam: current framerate " + std::to_string(current_fps) + " fps, requested " +
+      std::to_string(m_framerate));
 
-    // TODO(lucasw) need to get list of valid numerator/denominator pairs
-    // and match closest to what user put in.
-    stream_params.parm.capture.timeperframe.numerator = 1;
-    stream_params.parm.capture.timeperframe.denominator = m_framerate;
-    log(log_level_t::INFO, "usb_cam: setting framerate via VIDIOC_S_PARM");
-    if (usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_PARM), &stream_params) < 0) {
-      throw std::invalid_argument("Couldn't set camera framerate");
+    if (!(stream_params.parm.capture.capability & V4L2_CAP_TIMEPERFRAME)) {
+      // Do not call S_PARM on a device that cannot commit a frame interval;
+      // the failed/partial commit is exactly what corrupts the UVC state.
+      log(
+        log_level_t::WARN,
+        "usb_cam: V4L2_CAP_TIMEPERFRAME not supported; skipping VIDIOC_S_PARM");
+    } else if (usb_cam::utils::framerate_matches(current_fps, m_framerate)) {
+      // Already close enough: avoid another UVC probe/commit.
+      log(
+        log_level_t::INFO,
+        "usb_cam: framerate already matches within 0.1 fps; skipping VIDIOC_S_PARM");
+    } else {
+      // TODO(lucasw) need to get list of valid numerator/denominator pairs
+      // and match closest to what user put in.
+      stream_params.parm.capture.timeperframe.numerator = 1;
+      stream_params.parm.capture.timeperframe.denominator = m_framerate;
+      log(log_level_t::INFO, "usb_cam: setting framerate via VIDIOC_S_PARM");
+      if (usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_PARM), &stream_params) < 0) {
+        throw std::invalid_argument("Couldn't set camera framerate");
+      }
+      log(log_level_t::INFO, "usb_cam: VIDIOC_S_PARM returned");
     }
-    log(log_level_t::INFO, "usb_cam: VIDIOC_S_PARM returned");
   } else {
     log(log_level_t::INFO, "usb_cam: set_framerate=false; skipping VIDIOC_S_PARM");
   }
 
-  // Re-read the format after S_PARM: setting the frame interval commits the
-  // UVC streaming control, and a corrupted commit can change the sizeimage
-  // the kernel will use for REQBUFS.
+  // Re-read the format after the optional S_PARM: setting the frame interval
+  // commits the UVC streaming control, and a corrupted commit can change the
+  // sizeimage the kernel will use for REQBUFS.
   m_image.v4l2_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_G_FMT), &m_image.v4l2_fmt)) {
     throw std::runtime_error("Unable to read the v4l2 format after VIDIOC_S_PARM");
   }
   log(
     log_level_t::INFO,
-    "usb_cam: after S_PARM " + std::to_string(m_image.v4l2_fmt.fmt.pix.width) + "x" +
+    "usb_cam: after framerate setup " + std::to_string(m_image.v4l2_fmt.fmt.pix.width) + "x" +
     std::to_string(m_image.v4l2_fmt.fmt.pix.height) +
     " sizeimage=" + std::to_string(m_image.v4l2_fmt.fmt.pix.sizeimage) +
     " bytesperline=" + std::to_string(m_image.v4l2_fmt.fmt.pix.bytesperline));

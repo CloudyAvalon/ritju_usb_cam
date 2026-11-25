@@ -92,7 +92,7 @@ def _camera_container(context):
         composable_node_descriptions=nodes,
         output='screen',
         # respawn keeps camera and recorder alive across USB dropouts.
-        respawn=True, respawn_delay=10,
+        respawn=True, respawn_delay=20,
     )]
 
 

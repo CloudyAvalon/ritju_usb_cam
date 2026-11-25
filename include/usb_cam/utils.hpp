@@ -210,6 +210,19 @@ inline size_t validate_frame_geometry(int width, int height, size_t bytes_per_pi
   return bytes;
 }
 
+/// @brief True when the device already runs at the requested frame rate.
+/// @param tolerance absolute fps difference that counts as "same" (0.1 fps).
+inline bool framerate_matches(double current_fps, int requested_fps, double tolerance = 0.1)
+{
+  if (requested_fps <= 0 || current_fps <= 0.0) {
+    return false;
+  }
+  // Compare in milli-fps so the exact 0.1 boundary is not decided by binary
+  // floating point (15.1 - 15.0 is 0.09999999999999964).
+  const double diff = std::fabs(current_fps - static_cast<double>(requested_fps));
+  return std::round(diff * 1000.0) < std::round(tolerance * 1000.0);
+}
+
 /// @brief Calculate image timestamp from buffer time and epoch time shift.
 /// In this, the buffer time is first converted into microseconds before the epoch time shift,
 /// which is to be given in microseconds is added to it. Afterwards it is split into seconds

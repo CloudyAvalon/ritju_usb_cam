@@ -20,6 +20,7 @@
 #include "usb_cam/utils.hpp"
 
 using usb_cam::utils::fourcc_string;
+using usb_cam::utils::framerate_matches;
 using usb_cam::utils::sizeimage_bound;
 using usb_cam::utils::sizeimage_error;
 using usb_cam::utils::validate_frame_geometry;
@@ -94,4 +95,19 @@ TEST(FrameGeometry, RejectsOversizedImage)
 {
   EXPECT_THROW(validate_frame_geometry(8192, 8192, 4), std::out_of_range);
   EXPECT_THROW(validate_frame_geometry(16384, 16384, 3), std::out_of_range);
+}
+
+TEST(FramerateMatch, MatchesWithinTolerance)
+{
+  EXPECT_TRUE(framerate_matches(15.0, 15));
+  EXPECT_TRUE(framerate_matches(15.09, 15));
+  EXPECT_TRUE(framerate_matches(14.91, 15));
+}
+
+TEST(FramerateMatch, RejectsLargerDifference)
+{
+  EXPECT_FALSE(framerate_matches(15.1, 15));
+  EXPECT_FALSE(framerate_matches(30.0, 15));
+  EXPECT_FALSE(framerate_matches(0.0, 15));
+  EXPECT_FALSE(framerate_matches(15.0, 0));
 }

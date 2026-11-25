@@ -140,6 +140,6 @@ def generate_launch_description():
         composable_node_descriptions=camera_nodes,
         output='screen',
         # respawn keeps camera and recorder alive across USB dropouts.
-        respawn=True, respawn_delay=10,
+        respawn=True, respawn_delay=20,
     ))
     return ld
