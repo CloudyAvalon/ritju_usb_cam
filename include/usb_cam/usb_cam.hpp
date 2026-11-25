@@ -131,6 +131,7 @@ typedef struct parameters_t
   bool pub_raw;
   bool pub_compressed;
   bool frame_sanity_check;
+  bool set_framerate;
 
   parameters_t()
 // *INDENT-OFF*
@@ -159,7 +160,8 @@ typedef struct parameters_t
     undistort_image_gpu(false),
     pub_raw(true),
     pub_compressed(true),
-    frame_sanity_check(true)
+    frame_sanity_check(true),
+    set_framerate(true)
   {
   }
 // *INDENT-ON*
@@ -464,10 +466,13 @@ private:
   usb_cam::utils::io_method_t m_io;
   int m_fd;
   unsigned int m_number_of_buffers;
+  unsigned int m_allocated_buffers{0};
   std::shared_ptr<usb_cam::utils::buffer[]> m_buffers;
+  std::vector<char> m_read_buffer;
   image_t m_image;
   std::string m_last_frame_error;
   bool m_frame_sanity_enabled{true};
+  bool m_set_framerate{true};
   log_fn_t m_logger;
 
   AVFrame * m_avframe;

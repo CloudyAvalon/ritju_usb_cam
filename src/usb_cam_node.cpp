@@ -84,6 +84,7 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions& node_options)
   this->declare_parameter("pub_raw", true);
   this->declare_parameter("pub_compressed", true);
   this->declare_parameter("frame_sanity_check", true);
+  this->declare_parameter("set_framerate", true);
   this->declare_parameter("frame_sanity_max_consecutive", 10);
 
   get_params();
@@ -297,7 +298,7 @@ void UsbCamNode::get_params()
                                                         "exposure",           "autofocus",           "focus",
                                                         "undistort_image",    "undistort_image_gpu", "pub_raw",
                                                         "pub_compressed",     "frame_sanity_check",
-                                                        "frame_sanity_max_consecutive" });
+                                                        "frame_sanity_max_consecutive", "set_framerate" });
 
   assign_params(parameters);
 }
@@ -411,6 +412,10 @@ void UsbCamNode::assign_params(const std::vector<rclcpp::Parameter>& parameters)
     else if (parameter.get_name() == "frame_sanity_max_consecutive")
     {
       m_frame_sanity_max_consecutive = parameter.as_int();
+    }
+    else if (parameter.get_name() == "set_framerate")
+    {
+      m_parameters.set_framerate = parameter.as_bool();
     }
     else if (parameter.get_name() == "focus")
     {

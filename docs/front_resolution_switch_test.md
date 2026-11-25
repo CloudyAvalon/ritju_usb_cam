@@ -36,9 +36,17 @@ Each restart is one line:
 ```
 
 - `stopped after ...` — the helper stopped the node as planned.
-- `EARLY_EXIT after ...` — the node died before the interval (crash, failed
-  open, or the frame-sanity escalation shutting it down on purpose). This is
-  the signal to look at the node log.
+- `EARLY_EXIT after ...; retrying in N s` — the node died before the interval
+  (crash, failed open/stream, or the frame-sanity escalation shutting it down
+  on purpose). After a failure the helper waits `retry_delay`, then doubles it
+  up to `max_retry_delay` (10 → 20 → 40 → 60 s), so a broken stream does not
+  trigger `VIDIOC_S_PARM` every couple of seconds.
+- `framerate=... fps` — after every stop the helper prints the device's
+  current `timeperframe` from `v4l2-ctl --get-parm`. With
+  `set_framerate:=false` this is the driver default; use
+  `expected_framerate:=15` to flag a mismatch. Note this is the device's
+  configured rate, not a measured frame rate (for throughput use
+  `ros2 topic hz`).
 - `sizeimage=...` — after every stop the helper prints the driver-reported
   `Size Image` from `v4l2-ctl --get-fmt-video`. Values above the geometry
   bound are reported as `WARNING`; once the value reaches
@@ -59,9 +67,14 @@ Each restart is one line:
 | `cycles` | `0` | restarts to run, `0` = until Ctrl-C |
 | `pixel_format` | empty | override the params-file fourcc |
 | `io_method` | empty | override `io_method` (e.g. `userptr`) |
+| `set_framerate` | `true` | call `VIDIOC_S_PARM`; set `false` to skip the UVC commit path |
+| `retry_delay` | `10.0` | first wait after an EARLY_EXIT (node failed to start/stream) |
+| `max_retry_delay` | `60.0` | cap for the exponential retry backoff |
 | `pub_raw` | `true` | publish `<node_name>/image_raw` for the test |
 | `pub_compressed` | `true` | publish `<node_name>/compressed` |
 | `check_sizeimage` | `true` | query `v4l2-ctl --get-fmt-video` after each stop |
+| `check_framerate` | `true` | query `v4l2-ctl --get-parm` after each stop |
+| `expected_framerate` | `0.0` | warn when measured fps differs by >10% (0 = off) |
 | `sizeimage_stop_mib` | `100` | stop switching and exit 2 when `Size Image` reaches this many MiB |
 
 The helper starts `usb_cam_node_exe` directly, so it applies the same topic

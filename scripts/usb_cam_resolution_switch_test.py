@@ -61,6 +61,8 @@ def node_command(args, width, height):
         command += ['-p', f'pub_raw:={str(args.pub_raw).lower()}']
     if args.pub_compressed is not None:
         command += ['-p', f'pub_compressed:={str(args.pub_compressed).lower()}']
+    if args.set_framerate is not None:
+        command += ['-p', f'set_framerate:={str(args.set_framerate).lower()}']
 
     # The deployment launches remap these topics into the <node_name>/ namespace.
     # Without them the node publishes /image_raw and /camera_info at the root,
@@ -102,6 +104,28 @@ def read_sizeimage(device, v4l2ctl):
         'size': int(size.group(1)),
         'fourcc': fourcc.group(1) if fourcc else '',
     }, ''
+
+
+def read_framerate(device, v4l2ctl):
+    """Return (fps, error) from `v4l2-ctl --get-parm`."""
+    try:
+        result = subprocess.run(
+            [v4l2ctl, '-d', device, '--get-parm'],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, str(exc)
+    if result.returncode != 0:
+        return None, result.stderr.strip() or f'exit {result.returncode}'
+    text = result.stdout
+    match = re.search(r'Frames per second:\s*([0-9.]+)', text)
+    if match:
+        return float(match.group(1)), ''
+    match = re.search(r'Time per frame:\s*([0-9.]+)\s*s', text)
+    if match:
+        period = float(match.group(1))
+        if period > 0.0:
+            return 1.0 / period, ''
+    return None, 'Frames per second missing'
 
 
 def sizeimage_anomaly(info, stop_bytes=SIZEIMAGE_STOP_BYTES):
@@ -166,7 +190,11 @@ def main(argv=None):
     parser.add_argument('--cycles', type=int, default=0,
                         help='number of restarts, 0 = until Ctrl-C')
     parser.add_argument('--settle', type=float, default=1.5,
-                        help='seconds between instances (default 1.5)')
+                        help='seconds between successful instances (default 1.5)')
+    parser.add_argument('--retry-delay', type=float, default=10.0,
+                        help='first wait after an early exit (default 10 s)')
+    parser.add_argument('--max-retry-delay', type=float, default=60.0,
+                        help='cap for the exponential retry backoff (default 60 s)')
     parser.add_argument('--pixel-format', default='',
                         help='override pixel_format (default: from params file)')
     parser.add_argument('--io-method', default='',
@@ -175,9 +203,18 @@ def main(argv=None):
                         help='publish image_raw (default true for the test)')
     parser.add_argument('--pub-compressed', type=str2bool, default=True,
                         help='publish compressed image (default true)')
+    parser.add_argument('--set-framerate', type=str2bool, default=True,
+                        help='call VIDIOC_S_PARM (default true; false bypasses '
+                             'the UVC commit path)')
     parser.add_argument('--check-sizeimage', type=str2bool, default=True,
                         metavar='BOOL',
                         help='query v4l2-ctl after each stop (default true)')
+    parser.add_argument('--check-framerate', type=str2bool, default=True,
+                        metavar='BOOL',
+                        help='query v4l2-ctl --get-parm after each stop')
+    parser.add_argument('--expected-framerate', type=float, default=0.0,
+                        help='warn when the measured fps differs from this '
+                             '(0 = do not compare)')
     parser.add_argument('--v4l2ctl', default='v4l2-ctl',
                         help='v4l2-ctl binary (default v4l2-ctl)')
     parser.add_argument('--sizeimage-stop-mib', type=float,
@@ -199,14 +236,17 @@ def main(argv=None):
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
-    if args.check_sizeimage and shutil.which(args.v4l2ctl) is None:
-        print(f'warning: {args.v4l2ctl} not found; sizeimage checks disabled',
+    if (args.check_sizeimage or args.check_framerate) and \
+            shutil.which(args.v4l2ctl) is None:
+        print(f'warning: {args.v4l2ctl} not found; v4l2-ctl checks disabled',
               file=sys.stderr)
         args.check_sizeimage = False
+        args.check_framerate = False
 
     resolutions = [args.low, args.high]
     cycle = 0
     early_exits = 0
+    failure_streak = 0
     while not stop_requested and (args.cycles == 0 or cycle < args.cycles):
         width, height = resolutions[cycle % 2]
         cycle += 1
@@ -228,9 +268,15 @@ def main(argv=None):
         elapsed = time.monotonic() - started
         if elapsed < args.interval - 0.5:
             early_exits += 1
+            failure_streak += 1
+            delay = min(
+                args.max_retry_delay,
+                args.retry_delay * (2 ** (failure_streak - 1)))
             print(f'[cycle {cycle}] EARLY_EXIT after {elapsed:.1f}s '
-                  f'rc={returncode}', flush=True)
+                  f'rc={returncode}; retrying in {delay:.1f}s', flush=True)
         else:
+            failure_streak = 0
+            delay = args.settle
             print(f'[cycle {cycle}] stopped after {elapsed:.1f}s rc={returncode}',
                   flush=True)
         if args.check_sizeimage and not stop_requested:
@@ -253,9 +299,22 @@ def main(argv=None):
                     print(f'summary: cycles={cycle} early_exits={early_exits}',
                           flush=True)
                     return 2
+        if args.check_framerate and not stop_requested:
+            fps, error = read_framerate(args.device, args.v4l2ctl)
+            if fps is None:
+                print(f'[cycle {cycle}] framerate: {error}', flush=True)
+            else:
+                suffix = ''
+                if args.expected_framerate > 0.0 and \
+                        abs(fps - args.expected_framerate) > \
+                        max(0.5, args.expected_framerate * 0.1):
+                    suffix = (f' WARNING expected '
+                              f'{args.expected_framerate:.3f}')
+                print(f'[cycle {cycle}] framerate={fps:.3f} fps{suffix}',
+                      flush=True)
         if stop_requested:
             break
-        time.sleep(args.settle)
+        time.sleep(delay)
 
     print(f'summary: cycles={cycle} early_exits={early_exits}', flush=True)
     return 0

@@ -76,6 +76,21 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'pub_compressed', default_value='true',
             description='publish <node_name>/compressed'),
+        DeclareLaunchArgument(
+            'set_framerate', default_value='true',
+            description='call VIDIOC_S_PARM (false skips the UVC commit path)'),
+        DeclareLaunchArgument(
+            'check_framerate', default_value='true',
+            description='query v4l2-ctl --get-parm after each stop'),
+        DeclareLaunchArgument(
+            'expected_framerate', default_value='0.0',
+            description='warn when measured fps differs from this (0 = off)'),
+        DeclareLaunchArgument(
+            'retry_delay', default_value='10.0',
+            description='first wait after an early node exit'),
+        DeclareLaunchArgument(
+            'max_retry_delay', default_value='60.0',
+            description='cap for the exponential retry backoff'),
         ExecuteProcess(
             cmd=[
                 'ros2', 'run', 'usb_cam', 'usb_cam_resolution_switch_test',
@@ -88,11 +103,16 @@ def generate_launch_description():
                 '--cycles', LaunchConfiguration('cycles'),
                 '--pixel-format', LaunchConfiguration('pixel_format'),
                 '--check-sizeimage', LaunchConfiguration('check_sizeimage'),
+                '--check-framerate', LaunchConfiguration('check_framerate'),
+                '--expected-framerate', LaunchConfiguration('expected_framerate'),
                 '--sizeimage-stop-mib',
                 LaunchConfiguration('sizeimage_stop_mib'),
                 '--io-method', LaunchConfiguration('io_method'),
                 '--pub-raw', LaunchConfiguration('pub_raw'),
                 '--pub-compressed', LaunchConfiguration('pub_compressed'),
+                '--set-framerate', LaunchConfiguration('set_framerate'),
+                '--retry-delay', LaunchConfiguration('retry_delay'),
+                '--max-retry-delay', LaunchConfiguration('max_retry_delay'),
             ],
             output='screen',
         ),

@@ -114,3 +114,41 @@ usb_cam: requesting 4 mmap buffers via VIDIOC_REQBUFS
 
 If a future OOM happens again, the last line before it now identifies the
 stage: enumeration, negotiated format, or buffer request.
+
+## Why the sizeimage guard is not sufficient (UVC `dwMaxVideoFrameSize`)
+
+The log sequence
+
+```
+usb_cam: negotiated 1280x1024 fourcc=MJPG sizeimage=2622029 bytesperline=0
+usb_cam: requesting 4 mmap buffers via VIDIOC_REQBUFS
+```
+
+proves that G_FMT reported a perfectly sane 2.6 MiB payload, yet the process
+still died inside `VIDIOC_REQBUFS`.  `uvcvideo` does not size its vb2 buffers
+from the V4L2 `sizeimage` field alone: `uvc_queue_setup()` uses the streaming
+control's `dwMaxVideoFrameSize`, which is committed by the UVC probe/commit
+path (`VIDIOC_S_PARM` on this driver) and can remain corrupted even when G_FMT
+looks healthy.  That is the blind spot develop's sizeimage check also has, and
+why its detection did not fully solve the problem.
+
+Two additional diagnostics/hooks were added:
+
+- `usb_cam: setting framerate via VIDIOC_S_PARM` / `VIDIOC_S_PARM returned`,
+  then `usb_cam: after S_PARM ... sizeimage=...`;
+- the format is re-read and bounded again after S_PARM, before REQBUFS;
+- parameter `set_framerate` (default `true`).  Setting it to `false` skips
+  `VIDIOC_S_PARM` entirely:
+
+  ```bash
+  ros2 launch usb_cam front_resolution_switch_test.launch.py set_framerate:=false
+  ```
+
+  If the OOM disappears with `set_framerate:=false`, the commit triggered by
+  S_PARM is the trigger, and the driver should not be asked to change the
+  frame interval in this state.  If it still OOMs, the corrupted
+  `dwMaxVideoFrameSize` is independent of S_PARM and only USERPTR/READ or a
+  uvcvideo/kernel fix avoids it.
+
+`ffplay`/FFmpeg use a different V4L2 open/read path and do not perform this
+exact `usb_cam` sequence, which is why they can still show an image.
