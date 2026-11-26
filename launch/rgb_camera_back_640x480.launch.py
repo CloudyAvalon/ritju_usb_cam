@@ -30,7 +30,6 @@
 # ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-import argparse
 import os
 from pathlib import Path  # noqa: E402
 import sys
@@ -40,10 +39,13 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path)
 
 from camera_config import CameraConfig, USB_CAM_DIR  # noqa: E402
+from apriltag_config import apriltag_component  # noqa: E402
+from container_components import selected_components  # noqa: E402
+from video_stream_config import image_stream_component  # noqa: E402
 
 from launch import LaunchDescription  # noqa: E402
-from launch.actions import GroupAction  # noqa: E402
-from launch_ros.actions import Node  # noqa: E402
+from launch_ros.actions import ComposableNodeContainer  # noqa: E402
+from launch_ros.descriptions import ComposableNode  # noqa: E402
 
 import json
 def parse_cameras():
@@ -109,24 +111,35 @@ if camera_infos != None:
 def generate_launch_description():
     ld = LaunchDescription()
 
-    parser = argparse.ArgumentParser(description='usb_cam demo')
-    parser.add_argument('-n', '--node-name', dest='node_name', type=str,
-                        help='name for device', default='usb_cam')
-
     camera_nodes = [
-        Node(
-            package='usb_cam', executable='usb_cam_node_exe', output='screen',
+        ComposableNode(
+            package='usb_cam', plugin='usb_cam::UsbCamNode',
             name=camera.name,
             namespace=camera.namespace,
-            parameters=[camera.param_path],
+            parameters=[str(camera.param_path)],
             remappings=camera.remappings,
-            respawn=True,
-            respawn_delay=10,
         )
         for camera in CAMERAS
     ]
+    # Camera, recorder and charger detector share one container process: a
+    # single launch entry, one process and one respawn policy cover them.  The
+    # optional nodes are selected by USB_CAM_CONTAINER_COMPONENTS (camera,
+    # camera+stream or camera+stream+apriltag).
+    components = selected_components()
+    if 'stream' in components:
+        camera_nodes.append(image_stream_component())
+    if 'apriltag' in components:
+        camera_nodes.append(apriltag_component())
+    print(f'[usb_cam] back-camera container components: {"+".join(components)}')
 
-    camera_group = GroupAction(camera_nodes)
-
-    ld.add_action(camera_group)
+    ld.add_action(ComposableNodeContainer(
+        name='usb_cam_with_image_stream_container',
+        namespace='',
+        package='rclcpp_components',
+        executable='component_container_mt',
+        composable_node_descriptions=camera_nodes,
+        output='screen',
+        # respawn keeps camera and recorder alive across USB dropouts.
+        respawn=True, respawn_delay=20,
+    ))
     return ld

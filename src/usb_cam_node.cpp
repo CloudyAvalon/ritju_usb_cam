@@ -26,6 +26,7 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
+#include <cmath>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -83,6 +84,10 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions& node_options)
   this->declare_parameter("undistort_image_gpu", false);
   this->declare_parameter("pub_raw", true);
   this->declare_parameter("pub_compressed", true);
+  this->declare_parameter("frame_sanity_check", true);
+  this->declare_parameter("set_framerate", true);
+  this->declare_parameter("publish_rate", 0.0);
+  this->declare_parameter("frame_sanity_max_consecutive", 10);
 
   get_params();
   init();
@@ -141,6 +146,38 @@ std::string resolve_device_path(const std::string& path)
 
 void UsbCamNode::init()
 {
+  // Route UsbCam library logs into the node logger before any device work.
+  m_camera->set_logger(
+    [this](usb_cam::log_level_t level, const std::string & msg) {
+      const auto throttle_ms = usb_cam::kLogThrottleMs;
+      switch (level) {
+        case usb_cam::log_level_t::DEBUG:
+          RCLCPP_DEBUG(this->get_logger(), "%s", msg.c_str());
+          break;
+        case usb_cam::log_level_t::DEBUG_THROTTLE:
+          RCLCPP_DEBUG_THROTTLE(
+            this->get_logger(), *this->get_clock(), throttle_ms, "%s", msg.c_str());
+          break;
+        case usb_cam::log_level_t::INFO:
+          RCLCPP_INFO(this->get_logger(), "%s", msg.c_str());
+          break;
+        case usb_cam::log_level_t::INFO_THROTTLE:
+          RCLCPP_INFO_THROTTLE(
+            this->get_logger(), *this->get_clock(), throttle_ms, "%s", msg.c_str());
+          break;
+        case usb_cam::log_level_t::WARN:
+          RCLCPP_WARN(this->get_logger(), "%s", msg.c_str());
+          break;
+        case usb_cam::log_level_t::WARN_THROTTLE:
+          RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), throttle_ms, "%s", msg.c_str());
+          break;
+        case usb_cam::log_level_t::ERROR:
+          RCLCPP_ERROR(this->get_logger(), "%s", msg.c_str());
+          break;
+      }
+    });
+
   while (m_parameters.frame_id == "")
   {
     RCLCPP_WARN_ONCE(this->get_logger(), "Required Parameters not set...waiting until they are set");
@@ -214,6 +251,7 @@ void UsbCamNode::init()
   try
   {
     m_camera->configure(m_parameters, io_method);
+    m_camera->set_frame_sanity_enabled(m_parameters.frame_sanity_check);
   }
   catch (const std::exception& e)
   {
@@ -242,12 +280,30 @@ void UsbCamNode::init()
     return;
   }
 
-  // TODO(lucasw) should this check a little faster than expected frame rate?
-  // TODO(lucasw) how to do small than ms, or fractional ms- std::chrono::nanoseconds?
-  const int period_ms = 1000.0 / m_parameters.framerate;
-  m_timer = this->create_wall_timer(std::chrono::milliseconds(static_cast<int64_t>(period_ms)),
+  // Publish/capture timer is independent from the device frame interval:
+  // publish_rate wins when set, otherwise keep the legacy framerate behaviour.
+  const double publish_rate = usb_cam::utils::effective_publish_rate(
+    static_cast<double>(m_parameters.framerate), m_parameters.publish_rate);
+  if (!(publish_rate > 0.0) || !std::isfinite(publish_rate) ||
+    publish_rate > 1000.0)
+  {
+    RCLCPP_ERROR(this->get_logger(), "Invalid publish_rate %f (framerate %d)",
+                 publish_rate, m_parameters.framerate);
+    m_camera->shutdown();
+    rclcpp::shutdown();
+    return;
+  }
+  const int64_t period_ms = static_cast<int64_t>(1000.0 / publish_rate);
+  if (period_ms <= 0) {
+    RCLCPP_ERROR(this->get_logger(), "publish_rate %f gives a zero timer period", publish_rate);
+    m_camera->shutdown();
+    rclcpp::shutdown();
+    return;
+  }
+  m_timer = this->create_wall_timer(std::chrono::milliseconds(period_ms),
                                     std::bind(&UsbCamNode::update, this));
-  RCLCPP_INFO_STREAM(this->get_logger(), "Timer triggering every " << period_ms << " ms");
+  RCLCPP_INFO(this->get_logger(), "Publishing at %.3f Hz (device framerate %d)", publish_rate,
+              m_parameters.framerate);
 }
 
 void UsbCamNode::get_params()
@@ -261,7 +317,9 @@ void UsbCamNode::get_params()
                                                         "auto_white_balance", "white_balance",       "autoexposure",
                                                         "exposure",           "autofocus",           "focus",
                                                         "undistort_image",    "undistort_image_gpu", "pub_raw",
-                                                        "pub_compressed" });
+                                                        "pub_compressed",     "frame_sanity_check",
+                                                        "frame_sanity_max_consecutive", "set_framerate",
+                                                        "publish_rate" });
 
   assign_params(parameters);
 }
@@ -367,6 +425,22 @@ void UsbCamNode::assign_params(const std::vector<rclcpp::Parameter>& parameters)
     else if (parameter.get_name() == "pub_compressed")
     {
       m_parameters.pub_compressed = parameter.as_bool();
+    }
+    else if (parameter.get_name() == "frame_sanity_check")
+    {
+      m_parameters.frame_sanity_check = parameter.as_bool();
+    }
+    else if (parameter.get_name() == "frame_sanity_max_consecutive")
+    {
+      m_frame_sanity_max_consecutive = parameter.as_int();
+    }
+    else if (parameter.get_name() == "set_framerate")
+    {
+      m_parameters.set_framerate = parameter.as_bool();
+    }
+    else if (parameter.get_name() == "publish_rate")
+    {
+      m_parameters.publish_rate = parameter.as_double();
     }
     else if (parameter.get_name() == "focus")
     {
@@ -590,7 +664,7 @@ cv::Mat UsbCamNode::gpuUndistort(cv::Mat& img, cv::Mat map1, cv::Mat map2)
 bool UsbCamNode::take_and_send_image()
 {
   // Only resize if required
-  if (sizeof(m_image_msg->data) != m_camera->get_image_size_in_bytes())
+  if (m_image_msg->data.size() != m_camera->get_image_size_in_bytes())
   {
     m_image_msg->width = m_camera->get_image_width();
     m_image_msg->height = m_camera->get_image_height();
@@ -605,8 +679,43 @@ bool UsbCamNode::take_and_send_image()
     m_image_msg->data.resize(m_camera->get_image_size_in_bytes());
   }
 
-  // grab the image, pass image msg buffer to fill
-  m_camera->get_image(reinterpret_cast<char*>(&m_image_msg->data[0]));
+  // grab the image, pass image msg buffer to fill.
+  // A dropped frame (empty/oversized payload, missing MJPEG SOI, decode
+  // failure) must not publish a stale or garbage buffer.
+  if (!m_camera->get_image(reinterpret_cast<char*>(&m_image_msg->data[0])))
+  {
+    const std::string& reason = m_camera->last_frame_error();
+    if (reason.empty())
+    {
+      // No frame completed since the last tick: normal jitter, nothing to log.
+      return false;
+    }
+    ++m_bad_frame_total;
+    ++m_bad_frame_streak;
+    if (m_bad_frame_streak == 1 || (m_bad_frame_streak % 10) == 0)
+    {
+      RCLCPP_ERROR(get_logger(), "dropping frame (%zu total, %d consecutive): %s",
+                   m_bad_frame_total, m_bad_frame_streak, reason.c_str());
+    }
+    else
+    {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "dropping frame: %s", reason.c_str());
+    }
+    if (m_frame_sanity_max_consecutive > 0 &&
+        m_bad_frame_streak >= m_frame_sanity_max_consecutive)
+    {
+      // Escalate instead of dropping forever: the container is launched with
+      // respawn=True, so exiting here restarts the whole camera stack (usb_cam,
+      // recorder and apriltag) and the failure is visible in the logs.
+      RCLCPP_FATAL(get_logger(),
+                   "%d consecutive bad frames (last: %s); shutting the camera stack down so the "
+                   "container respawns", m_bad_frame_streak, reason.c_str());
+      rclcpp::shutdown();
+      return false;
+    }
+    return false;
+  }
+  m_bad_frame_streak = 0;
   *m_camera_info_msg = m_camera_info->getCameraInfo();
   RCLCPP_INFO_ONCE(get_logger(), "undistort_image: %s", m_parameters.undistort_image ? "true" : "false");
   RCLCPP_INFO_ONCE(get_logger(), "undistort_image_gpu: %s", m_parameters.undistort_image_gpu ? "true" : "false");
@@ -679,6 +788,7 @@ UsbCamNode::parameters_callback(const std::vector<rclcpp::Parameter>& parameters
   RCLCPP_DEBUG(this->get_logger(), "Setting parameters for %s", m_parameters.camera_name.c_str());
   m_timer->reset();
   assign_params(parameters);
+  m_camera->set_frame_sanity_enabled(m_parameters.frame_sanity_check);
   set_v4l2_params();
   rcl_interfaces::msg::SetParametersResult result;
   result.successful = true;
@@ -693,10 +803,11 @@ void UsbCamNode::update()
     // If the camera exposure longer higher than the framerate period
     // then that caps the framerate.
     // auto t0 = now();
-    bool isSuccessful = take_and_send_image();
-    if (!isSuccessful)
+    if (!take_and_send_image())
     {
-      RCLCPP_WARN_ONCE(this->get_logger(), "USB camera did not respond in time.");
+      RCLCPP_DEBUG_THROTTLE(
+        this->get_logger(), *this->get_clock(), 5000,
+        "no frame published this tick (no new frame or a dropped frame)");
     }
   }
 }

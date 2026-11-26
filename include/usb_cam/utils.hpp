@@ -37,9 +37,13 @@ extern "C" {
 #include <sys/time.h>
 #include <unistd.h>  // for access
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <ctime>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -97,6 +101,133 @@ inline time_t get_epoch_time_shift_us()
     epoch_time.tv_sec * 1000000 + epoch_time.tv_usec;
 
   return static_cast<time_t>(epoch_us - uptime_us);
+}
+
+/// Same multiplier/cap as the develop-branch sizeimage preflight.
+constexpr size_t kMaxSizeimageFactor = 4;
+constexpr size_t kAbsSizeimageCap = 64u * 1024u * 1024u;
+
+/// @brief Device-side bytes per pixel for a V4L2 fourcc.
+inline size_t device_bpp_for_fourcc(uint32_t fourcc)
+{
+  switch (fourcc) {
+    case V4L2_PIX_FMT_MJPEG:
+    case V4L2_PIX_FMT_JPEG:
+      return 3;  // JPEG worst case ~ uncompressed
+    case V4L2_PIX_FMT_YUYV:
+    case V4L2_PIX_FMT_UYVY:
+    case V4L2_PIX_FMT_YUV420:
+    case V4L2_PIX_FMT_YVU420:
+      return 2;
+    case V4L2_PIX_FMT_GREY:
+      return 1;
+    default:
+      return 3;
+  }
+}
+
+/// @brief Plausible sizeimage bound for the requested geometry.
+inline size_t sizeimage_bound(int width, int height, uint32_t fourcc)
+{
+  if (width <= 0 || height <= 0) {
+    return 0;
+  }
+  const size_t expected =
+    static_cast<size_t>(width) * static_cast<size_t>(height) *
+    device_bpp_for_fourcc(fourcc);
+  return std::min(expected * kMaxSizeimageFactor, kAbsSizeimageCap);
+}
+
+/// @brief Printable fourcc (e.g. "MJPG").
+inline std::string fourcc_string(uint32_t fourcc)
+{
+  char text[5] = {
+    static_cast<char>(fourcc & 0xff),
+    static_cast<char>((fourcc >> 8) & 0xff),
+    static_cast<char>((fourcc >> 16) & 0xff),
+    static_cast<char>((fourcc >> 24) & 0xff),
+    0,
+  };
+  return std::string(text);
+}
+
+/// @brief Reject a driver-reported sizeimage before any allocation.
+/// @return empty string when acceptable, otherwise the reason.
+inline std::string sizeimage_error(uint32_t sizeimage, int width, int height, uint32_t fourcc)
+{
+  const size_t bound = sizeimage_bound(width, height, fourcc);
+  if (bound == 0) {
+    return "";
+  }
+  if (sizeimage == 0) {
+    // Driver filled 0: legal, the allocator falls back to the geometry.
+    return "";
+  }
+  if (sizeimage > 0xF0000000u) {
+    return "sizeimage " + std::to_string(sizeimage) + " looks like uint32 garbage (" +
+           std::to_string(width) + "x" + std::to_string(height) + " '" +
+           fourcc_string(fourcc) + "')";
+  }
+  if (sizeimage > bound) {
+    return "sizeimage " + std::to_string(sizeimage) + " exceeds accepted bound " +
+           std::to_string(bound) + " (" + std::to_string(width) + "x" +
+           std::to_string(height) + " '" + fourcc_string(fourcc) + "')";
+  }
+  return "";
+}
+
+/// Upper bound for one decoded/packed image buffer (128 MiB).  Deployments
+/// use at most 1280x1024 RGB (~4 MiB); this rejects typos and driver garbage
+/// before a large resize/new[]/mmap happens.
+constexpr size_t kMaxImageBytes = 128u * 1024u * 1024u;
+
+/// @brief Validate requested geometry and return its byte size.
+/// @param bytes_per_pixel conservative bytes per pixel before the pixel format
+///        is known (use 3 for RGB/MJPEG, 4 when unsure).
+/// @throws std::invalid_argument / std::out_of_range / std::overflow_error
+inline size_t validate_frame_geometry(int width, int height, size_t bytes_per_pixel)
+{
+  if (width <= 0 || height <= 0) {
+    throw std::invalid_argument("image width/height must be positive");
+  }
+  if (width > 16384 || height > 16384) {
+    throw std::out_of_range("image width/height exceeds 16384 pixels");
+  }
+  if (bytes_per_pixel == 0) {
+    throw std::invalid_argument("bytes per pixel must be positive");
+  }
+  const size_t pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+  if (pixels > std::numeric_limits<size_t>::max() / bytes_per_pixel) {
+    throw std::overflow_error("image byte size overflow");
+  }
+  const size_t bytes = pixels * bytes_per_pixel;
+  if (bytes > kMaxImageBytes) {
+    throw std::out_of_range(
+            "image " + std::to_string(width) + "x" + std::to_string(height) +
+            " needs " + std::to_string(bytes) + " bytes, above the " +
+            std::to_string(kMaxImageBytes) + "-byte limit");
+  }
+  return bytes;
+}
+
+/// @brief Publish rate used by the node timer: explicit publish_rate wins,
+/// otherwise fall back to the device framerate (legacy behaviour).
+inline double effective_publish_rate(double framerate, double publish_rate)
+{
+  return (publish_rate > 0.0) ? publish_rate : framerate;
+}
+
+/// @brief True when the device already runs at the requested frame rate.
+/// @param tolerance absolute fps difference that counts as "same" (0.1 fps).
+inline bool framerate_matches(double current_fps, int requested_fps, double tolerance = 0.1)
+{
+  if (requested_fps <= 0 || current_fps <= 0.0) {
+    return false;
+  }
+  // Compare in milli-fps so the exact 0.1 boundary is not decided by binary
+  // floating point (15.1 - 15.0 is 0.09999999999999964).
+  const double diff = std::fabs(current_fps - static_cast<double>(requested_fps));
+  return std::round(diff * 1000.0) < std::round(tolerance * 1000.0);
 }
 
 /// @brief Calculate image timestamp from buffer time and epoch time shift.

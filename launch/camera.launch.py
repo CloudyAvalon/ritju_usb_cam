@@ -121,7 +121,7 @@ def generate_launch_description():
             parameters=[camera.param_path, get_node_parameters(camera.name)],
             remappings=camera.remappings,
             respawn=True,
-            respawn_delay=10,
+            respawn_delay=15,
         )
         for camera in CAMERAS
     ]
