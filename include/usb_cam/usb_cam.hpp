@@ -133,6 +133,7 @@ typedef struct parameters_t
   bool frame_sanity_check;
   bool set_framerate;
   double publish_rate;
+  int device_open_delay_ms;
 
   parameters_t()
 // *INDENT-OFF*
@@ -163,7 +164,8 @@ typedef struct parameters_t
     pub_compressed(true),
     frame_sanity_check(true),
     set_framerate(true),
-    publish_rate(0.0)
+    publish_rate(0.0),
+    device_open_delay_ms(2000)
   {
   }
 // *INDENT-ON*
@@ -475,6 +477,7 @@ private:
   std::string m_last_frame_error;
   bool m_frame_sanity_enabled{true};
   bool m_set_framerate{true};
+  int m_device_open_delay_ms{2000};
   log_fn_t m_logger;
 
   AVFrame * m_avframe;

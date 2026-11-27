@@ -87,6 +87,7 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions& node_options)
   this->declare_parameter("frame_sanity_check", true);
   this->declare_parameter("set_framerate", true);
   this->declare_parameter("publish_rate", 0.0);
+  this->declare_parameter("device_open_delay_ms", 2000);
   this->declare_parameter("frame_sanity_max_consecutive", 10);
 
   get_params();
@@ -206,22 +207,6 @@ void UsbCamNode::init()
   cameraMatrix = (cv::Mat_<double>(3, 3) << info_msg.k[0], 0, info_msg.k[2], 0, info_msg.k[1], info_msg.k[3], 0, 0, 1);
   distCoeffs = (cv::Mat_<double>(5, 1) << info_msg.d[0], info_msg.d[1], info_msg.d[2], info_msg.d[3], info_msg.d[4]);
 
-  // Check if given device name is an available v4l2 device
-  auto available_devices = usb_cam::utils::available_devices();
-  if (available_devices.find(m_parameters.device_name) == available_devices.end())
-  {
-    RCLCPP_ERROR_STREAM(this->get_logger(), "Device specified is not available or is not a vaild V4L2 device: `"
-                                                << m_parameters.device_name << "`");
-    RCLCPP_INFO(this->get_logger(), "Available V4L2 devices are:");
-    for (const auto& device : available_devices)
-    {
-      RCLCPP_INFO_STREAM(this->get_logger(), "    " << device.first);
-      RCLCPP_INFO_STREAM(this->get_logger(), "        " << device.second.card);
-    }
-    rclcpp::shutdown();
-    return;
-  }
-
   // if pixel format is equal to 'mjpeg', i.e. raw mjpeg stream, initialize compressed image message
   // and publisher
   if (m_parameters.pixel_format_name == "mjpeg2rgb")
@@ -319,7 +304,7 @@ void UsbCamNode::get_params()
                                                         "undistort_image",    "undistort_image_gpu", "pub_raw",
                                                         "pub_compressed",     "frame_sanity_check",
                                                         "frame_sanity_max_consecutive", "set_framerate",
-                                                        "publish_rate" });
+                                                        "publish_rate",       "device_open_delay_ms" });
 
   assign_params(parameters);
 }
@@ -441,6 +426,10 @@ void UsbCamNode::assign_params(const std::vector<rclcpp::Parameter>& parameters)
     else if (parameter.get_name() == "publish_rate")
     {
       m_parameters.publish_rate = parameter.as_double();
+    }
+    else if (parameter.get_name() == "device_open_delay_ms")
+    {
+      m_parameters.device_open_delay_ms = parameter.as_int();
     }
     else if (parameter.get_name() == "focus")
     {

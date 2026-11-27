@@ -39,6 +39,7 @@ extern "C" {
 }
 
 #include <chrono>
+#include <thread>
 #include <ctime>
 #include <iostream>
 #include <set>
@@ -144,7 +145,9 @@ bool UsbCam::read_frame()
         m_image.v4l2_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
         // Get current v4l2 pixel format
-        if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_G_FMT), &m_image.v4l2_fmt)) {
+        if (-1 == usb_cam::utils::xioctl(
+            m_fd, static_cast<int>(VIDIOC_G_FMT), &m_image.v4l2_fmt))
+        {
           switch (errno) {
             case EAGAIN:
               return false;
@@ -502,7 +505,7 @@ void UsbCam::init_userp()
   req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req.memory = V4L2_MEMORY_USERPTR;
 
-  if (-1 == usb_cam::utils::xioctl(m_fd, VIDIOC_REQBUFS, &req)) {
+  if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_REQBUFS), &req)) {
     if (EINVAL == errno) {
       throw std::invalid_argument("Device does not support user pointer i/o");
     } else {
@@ -593,7 +596,8 @@ void UsbCam::init_device()
   // Set v4l2 capture format
   // Note VIDIOC_S_FMT may change width and height
   if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_FMT), &m_image.v4l2_fmt)) {
-    throw strerror(errno);
+    throw std::runtime_error(
+            std::string("VIDIOC_S_FMT failed: ") + std::strerror(errno));
   }
 
   // The UVC descriptor bug can report a garbage sizeimage after a resolution
@@ -647,7 +651,8 @@ void UsbCam::init_device()
     m_image.v4l2_fmt.fmt.pix.pixelformat = target_fourcc;
     m_image.v4l2_fmt.fmt.pix.field = V4L2_FIELD_ANY;
     if (-1 == usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_FMT), &m_image.v4l2_fmt)) {
-      throw strerror(errno);
+      throw std::runtime_error(
+              std::string("VIDIOC_S_FMT kick failed: ") + std::strerror(errno));
     }
   }
   log(
@@ -673,7 +678,8 @@ void UsbCam::init_device()
     memset(&stream_params, 0, sizeof(stream_params));
     stream_params.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_G_PARM), &stream_params) < 0) {
-      throw strerror(errno);
+      throw std::runtime_error(
+              std::string("VIDIOC_G_PARM failed: ") + std::strerror(errno));
     }
 
     const auto & tpf = stream_params.parm.capture.timeperframe;
@@ -701,7 +707,9 @@ void UsbCam::init_device()
       stream_params.parm.capture.timeperframe.numerator = 1;
       stream_params.parm.capture.timeperframe.denominator = m_framerate;
       log(log_level_t::INFO, "usb_cam: setting framerate via VIDIOC_S_PARM");
-      if (usb_cam::utils::xioctl(m_fd, static_cast<int>(VIDIOC_S_PARM), &stream_params) < 0) {
+      if (usb_cam::utils::xioctl(
+          m_fd, static_cast<int>(VIDIOC_S_PARM), &stream_params) < 0)
+      {
         throw std::invalid_argument("Couldn't set camera framerate");
       }
       log(log_level_t::INFO, "usb_cam: VIDIOC_S_PARM returned");
@@ -765,18 +773,33 @@ void UsbCam::open_device()
 {
   struct stat st;
 
+  // Open exactly once.  A failed open is recovered by restarting the whole
+  // node/container (the helper does this with backoff), not by hammering the
+  // device node here.
   if (-1 == stat(m_device_name.c_str(), &st)) {
-    throw strerror(errno);
+    throw std::runtime_error(
+            "Cannot access " + m_device_name + ": " + std::strerror(errno));
   }
-
   if (!S_ISCHR(st.st_mode)) {
-    throw strerror(errno);
+    throw std::runtime_error(m_device_name + " is not a character device");
   }
 
   m_fd = open(m_device_name.c_str(), O_RDWR /* required */ | O_NONBLOCK, 0);
-
   if (-1 == m_fd) {
-    throw strerror(errno);
+    throw std::runtime_error(
+            "Cannot open " + m_device_name + ": " + std::strerror(errno));
+  }
+
+  // Give the just-opened device a moment before the first GET_* ioctl.  This
+  // is a single wait, not a retry loop: if the device is still not ready
+  // afterwards, the node fails and the launcher/helper restarts it.
+  if (m_device_open_delay_ms > 0) {
+    log(
+      log_level_t::INFO,
+      "usb_cam: device opened; waiting " + std::to_string(m_device_open_delay_ms) +
+      " ms before reading state");
+    std::this_thread::sleep_for(
+      std::chrono::milliseconds(m_device_open_delay_ms));
   }
 }
 
@@ -785,6 +808,7 @@ void UsbCam::configure(
 {
   m_device_name = parameters.device_name;
   m_io = io_method;
+  m_device_open_delay_ms = std::max(0, parameters.device_open_delay_ms);
 
   // Validate user input before opening the device or constructing a pixel
   // format: the MJPEG decoder allocates AVFrames in its constructor from these
