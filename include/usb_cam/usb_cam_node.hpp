@@ -90,6 +90,10 @@ public:
 
   parameters_t m_parameters;
 
+  size_t m_bad_frame_total{0};
+  int m_bad_frame_streak{0};
+  int m_frame_sanity_max_consecutive{10};
+
   sensor_msgs::msg::CameraInfo::SharedPtr m_camera_info_msg;
   std::shared_ptr<camera_info_manager::CameraInfoManager> m_camera_info;
 

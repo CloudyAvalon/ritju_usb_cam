@@ -92,6 +92,14 @@ if(BUILD_TESTING)
     test/test_pixel_formats.cpp)
   target_link_libraries(test_pixel_formats
     ${PROJECT_NAME} m stdc++)
+  ament_add_gtest(test_frame_sanity
+    test/test_frame_sanity.cpp)
+  target_link_libraries(test_frame_sanity
+    ${PROJECT_NAME} m stdc++)
+  ament_add_gtest(test_sizeimage_guard
+    test/test_sizeimage_guard.cpp)
+  target_link_libraries(test_sizeimage_guard
+    ${PROJECT_NAME} m stdc++)
   if(INTEGRATION_TESTS)
     ament_add_gtest(test_usb_cam_lib
       test/test_usb_cam_lib.cpp)
@@ -103,6 +111,14 @@ endif()
 install(
   PROGRAMS scripts/show_image.py
   DESTINATION lib/${PROJECT_NAME})
+install(
+  PROGRAMS scripts/topic_latency_probe.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME topic_latency_probe)
+install(
+  PROGRAMS scripts/usb_cam_resolution_switch_test.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME usb_cam_resolution_switch_test)
 
 install(TARGETS
   ${PROJECT_NAME}

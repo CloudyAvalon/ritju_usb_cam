@@ -43,6 +43,7 @@ extern "C" {
 #include <string>
 #include <vector>
 
+#include "usb_cam/logging.hpp"
 #include "usb_cam/utils.hpp"
 #include "usb_cam/formats/pixel_format_base.hpp"
 #include "usb_cam/formats/av_pixel_format_helper.hpp"
@@ -129,6 +130,10 @@ typedef struct parameters_t
   bool undistort_image_gpu;
   bool pub_raw;
   bool pub_compressed;
+  bool frame_sanity_check;
+  bool set_framerate;
+  double publish_rate;
+  int device_open_delay_ms;
 
   parameters_t()
 // *INDENT-OFF*
@@ -156,7 +161,11 @@ typedef struct parameters_t
     undistort_image(false),
     undistort_image_gpu(false),
     pub_raw(true),
-    pub_compressed(true)
+    pub_compressed(true),
+    frame_sanity_check(true),
+    set_framerate(true),
+    publish_rate(0.0),
+    device_open_delay_ms(2000)
   {
   }
 // *INDENT-ON*
@@ -181,12 +190,29 @@ typedef struct image_t
   }
   size_t set_bytes_per_line()
   {
-    bytes_per_line = width * pixel_format->byte_depth() * pixel_format->channels();
+    const size_t depth = pixel_format->byte_depth();
+    const size_t channels = pixel_format->channels();
+    if (width == 0 || height == 0 || depth == 0 || channels == 0) {
+      throw std::invalid_argument("invalid image geometry or pixel format");
+    }
+    if (width > std::numeric_limits<size_t>::max() / depth / channels) {
+      throw std::overflow_error("bytes-per-line overflow");
+    }
+    bytes_per_line = width * depth * channels;
     return bytes_per_line;
   }
   size_t set_size_in_bytes()
   {
+    if (height > std::numeric_limits<size_t>::max() / bytes_per_line) {
+      throw std::overflow_error("image byte size overflow");
+    }
     size_in_bytes = height * bytes_per_line;
+    if (size_in_bytes > usb_cam::utils::kMaxImageBytes) {
+      throw std::out_of_range(
+              "image " + std::to_string(width) + "x" + std::to_string(height) +
+              " needs " + std::to_string(size_in_bytes) + " bytes, above the " +
+              std::to_string(usb_cam::utils::kMaxImageBytes) + "-byte limit");
+    }
     return size_in_bytes;
   }
 
@@ -218,11 +244,23 @@ public:
   ///   auto new_image = get_image();
   ///   image_msg.data.resize(step * height);
   ///   memcpy(&image_msg.data[0], new_image->frame.base, image_msg.data.size());
+  /// @return pointer to image data, or nullptr when the frame was dropped
   char * get_image();
 
   /// @brief Overload of get_image to allow users to pass
   /// in an image pointer to fill in
-  void get_image(char * destination);
+  /// @return true when a valid frame was written, false when it was dropped
+  ///         (destination is left untouched for sanity-check drops)
+  bool get_image(char * destination);
+
+  /// @brief Reason of the last dropped frame (empty after a successful grab)
+  const std::string & last_frame_error() const {return m_last_frame_error;}
+
+  /// @brief Enable/disable the driver payload sanity checks (default enabled)
+  void set_frame_sanity_enabled(bool enabled) {m_frame_sanity_enabled = enabled;}
+
+  /// @brief Route library diagnostics to a ROS logger (rclcpp-free sink).
+  inline void set_logger(log_fn_t fn) {m_logger = std::move(fn);}
 
   std::vector<capture_format_t> get_supported_formats();
 
@@ -356,22 +394,26 @@ public:
 
     if (found_driver_format == nullptr) {
       // List the supported formats of this driver for the user before throwing
-      std::cerr << "This driver supports the following formats:" << std::endl;
+      log(log_level_t::WARN, "This driver supports the following formats:");
       for (auto driver_fmt : driver_supported_formats(args)) {
-        std::cerr << "\t" << driver_fmt->name() << std::endl;
+        log(log_level_t::WARN, "\t" + driver_fmt->name());
       }
       throw std::invalid_argument(
               "Specified format `" + args.name + "` is unsupported by this ROS driver"
       );
     }
 
-    std::cout << "This device supports the following formats:" << std::endl;
+    log(log_level_t::INFO, "This device supports the following formats:");
     for (auto fmt : this->supported_formats()) {
       // Always list the devices supported formats for the user
-      std::cout << "\t" << fmt.format.description << " ";
-      std::cout << fmt.v4l2_fmt.width << " x " << fmt.v4l2_fmt.height << " (";
-      std::cout << fmt.v4l2_fmt.discrete.denominator / fmt.v4l2_fmt.discrete.numerator << " Hz)";
-      std::cout << std::endl;
+      log(
+        log_level_t::INFO,
+        "\t" + std::string(reinterpret_cast<const char *>(fmt.format.description)) + " " +
+        std::to_string(fmt.v4l2_fmt.width) + " x " +
+        std::to_string(fmt.v4l2_fmt.height) + " (" +
+        std::to_string(
+          fmt.v4l2_fmt.discrete.denominator /
+          fmt.v4l2_fmt.discrete.numerator) + " Hz)");
 
       if (fmt.v4l2_fmt.pixel_format == found_driver_format->v4l2()) {
         result = true;
@@ -416,19 +458,27 @@ private:
   void init_device();
 
   void open_device();
-  void grab_image();
-  void read_frame();
+  bool grab_image();
+  bool read_frame();
   void process_image(const char * src, char * & dest, const int & bytes_used);
 
   void uninit_device();
   void close_device();
+  void log(log_level_t level, const std::string & msg) const;
 
   std::string m_device_name;
   usb_cam::utils::io_method_t m_io;
   int m_fd;
   unsigned int m_number_of_buffers;
+  unsigned int m_allocated_buffers{0};
   std::shared_ptr<usb_cam::utils::buffer[]> m_buffers;
+  std::vector<char> m_read_buffer;
   image_t m_image;
+  std::string m_last_frame_error;
+  bool m_frame_sanity_enabled{true};
+  bool m_set_framerate{true};
+  int m_device_open_delay_ms{2000};
+  log_fn_t m_logger;
 
   AVFrame * m_avframe;
   AVCodec * m_avcodec;
